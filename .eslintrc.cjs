@@ -1,6 +1,8 @@
 module.exports = {
   root: true,
-  env: { browser: true, es2022: true },
+  // `node: true` cubre los archivos de configuración (vite.config.js, postcss,
+  // tailwind), que usan `process.env` y `module.exports`.
+  env: { browser: true, node: true, es2022: true },
   extends: [
     'eslint:recommended',
     'plugin:react/recommended',

@@ -57,7 +57,17 @@ export const accessService = {
 // Solapín digital
 // ---------------------------------------------------------------------------
 export const credentialService = {
-  myBadge: () => api.get('/solapines/my-badge/').then(unwrap),
+  myBadge: () => api.get('/solapines/mio/').then(unwrap),
+  /** Imagen final del solapín (PNG compuesto en el backend, RF-03.3). */
+  myBadgeImage: () =>
+    api
+      .get('/solapines/mio/imagen/', { params: { _t: Date.now() }, responseType: 'blob' })
+      .then((response) => response.data),
+  /** Descarga la imagen del solapín con el nombre que indica el backend. */
+  downloadMyBadge: () =>
+    api.get('/solapines/mio/imagen/', { params: { download: 1 }, responseType: 'blob' }),
+  /** Alias histórico; el endpoint oficial es ``mio/`` (RF-02.3). */
+  mySolapin: () => api.get('/solapines/mio/').then(unwrap),
   verify: (payload) => api.post('/solapines/verify/', payload).then(unwrap),
   templates: (params) =>
     api.get('/solapines/templates/', { params: clean(params) }).then(unwrap),

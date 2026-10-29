@@ -4,6 +4,8 @@
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 
+export * from './offlineQueue';
+
 /** Combina clases condicionales resolviendo conflictos de Tailwind. */
 export function cn(...inputs) {
   return twMerge(clsx(inputs));
@@ -79,6 +81,11 @@ export function filenameFromDisposition(header, fallback = 'reporte') {
   if (!header) return fallback;
   const match = /filename="?([^"]+)"?/.exec(header);
   return match ? match[1] : fallback;
+}
+
+/** Indica si el dispositivo tiene conexión (RNF-09). */
+export function isOnline() {
+  return typeof navigator === 'undefined' ? true : navigator.onLine !== false;
 }
 
 /** Debounce simple. */

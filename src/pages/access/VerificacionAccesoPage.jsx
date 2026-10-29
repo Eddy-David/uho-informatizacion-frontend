@@ -1,12 +1,56 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { accessService, coreService } from '@/services';
 import { parseApiError } from '@/services/api';
 import { PageContainer, PageHeader } from '@/components/layout/PageHeader';
 import { useAuth } from '@/features/auth/AuthContext';
 import { useToast } from '@/components/ui/Toast';
 import Icon from '@/components/ui/Icon';
-import StatusBadge from '@/components/ui/StatusBadge';
-import { formatDateTime, statusClass } from '@/utils';
+import Modal from '@/components/ui/Modal';
+import QrScanner from '@/components/ui/QrScanner';
+import {
+  countPending,
+  enqueueVerification,
+  formatDateTime,
+  isOnline,
+  listPending,
+  removeMany,
+  statusClass,
+  toSyncPayload,
+} from '@/utils';
+
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+
+/**
+ * La cámara (`getUserMedia`) sólo está disponible en contextos seguros.
+ * Abrir la app como `http://192.168.x.x:5173` desde un móvil lanza un error y
+ * deja el escáner sin vídeo, por eso se avisa antes de pulsar el botón.
+ */
+function isInsecureCameraContext() {
+  if (typeof window === 'undefined') return false;
+  return !window.isSecureContext;
+}
+
+/**
+ * Extrae el identificador del contenido leído del QR (RF-04.1).
+ *
+ * El QR del solapín codifica ``{"uuid": "…", "estado": "ACTIVO"}`` (RF-03.9),
+ * pero también se aceptan el UUID en texto plano o el número de solapín, para
+ * que códigos antiguos o impresos sigan funcionando.
+ */
+export function extractIdentifier(decodedText) {
+  const texto = (decodedText || '').trim();
+  if (!texto) return '';
+  const uuid = texto.match(UUID_RE)?.[0];
+  if (uuid) return uuid.toLowerCase();
+  try {
+    const json = JSON.parse(texto);
+    const fromJson = String(json?.uuid || json?.codigo_qr || '').trim();
+    if (fromJson) return fromJson.toLowerCase();
+  } catch {
+    // No era JSON: puede ser un número de solapín o un CI.
+  }
+  return texto.toUpperCase().startsWith('UHO-') ? texto.toUpperCase() : texto;
+}
 
 const REASONS = {
   NO_ENCONTRADO: 'Persona o solapín no encontrado',
@@ -35,6 +79,82 @@ export default function AccessVerificationPage() {
   });
   const [result, setResult] = useState(null);
   const [loading, setLoading] = useState(false);
+  const [scannerOpen, setScannerOpen] = useState(false);
+  // Cambia en cada apertura para remontar el escáner y reiniciar la cámara (RF-04.1).
+  const [scannerKey, setScannerKey] = useState(0);
+  // Aviso de contexto seguro (RF-04.1): en http://IP-local el navegador
+  // bloquea la cámara. Se muestra UNA sola vez, bajo el botón del escáner
+  // (antes había dos bloques iguales y además un toast en cada visita).
+  const insecureCameraContext = isInsecureCameraContext();
+  useEffect(() => {
+    if (!insecureCameraContext) return;
+    console.warn(
+      '[RF-04.1] Contexto no seguro: la cámara sólo funciona en HTTPS o localhost.',
+      window.location.href,
+    );
+  }, [insecureCameraContext]);
+
+  // Cola offline de la PWA (RNF-09): pendientes guardados y estado del envío.
+  const [online, setOnline] = useState(isOnline);
+  const [pending, setPending] = useState(0);
+  const [syncing, setSyncing] = useState(false);
+
+  const refreshPending = useCallback(() => {
+    countPending().then(setPending).catch(() => setPending(0));
+  }, []);
+
+  /** Envía la cola al backend; sólo se borran los registros aceptados. */
+  const syncQueue = useCallback(
+    async ({ silent = false } = {}) => {
+      if (!isOnline()) {
+        if (!silent) toast.warning('Sin conexión: no se puede sincronizar todavía.');
+        return;
+      }
+      setSyncing(true);
+      try {
+        const items = await listPending();
+        if (!items.length) {
+          setPending(0);
+          return;
+        }
+        const response = await accessService.syncOffline(items.map(toSyncPayload));
+        // El servidor responde con created/skipped (duplicados por client_uuid).
+        await removeMany(items.map((item) => item.client_uuid));
+        refreshPending();
+        toast.success(
+          `Sincronización completa: ${response?.created ?? items.length} registro(s) enviado(s)` +
+            (response?.skipped ? `, ${response.skipped} ya existían.` : '.'),
+        );
+      } catch (error) {
+        // Si falla la red se conserva la cola y se reintenta al volver la conexión.
+        toast.error(parseApiError(error));
+      } finally {
+        setSyncing(false);
+        refreshPending();
+      }
+    },
+    [toast, refreshPending],
+  );
+
+  // Vigila el estado de la red: al recuperar la conexión se sincroniza la cola.
+  useEffect(() => {
+    refreshPending();
+    const goOnline = () => {
+      setOnline(true);
+      toast.info('Conexión restablecida. Sincronizando verificaciones pendientes…');
+      syncQueue({ silent: true });
+    };
+    const goOffline = () => {
+      setOnline(false);
+      toast.warning('Sin conexión: las verificaciones se guardarán en el dispositivo.');
+    };
+    window.addEventListener('online', goOnline);
+    window.addEventListener('offline', goOffline);
+    return () => {
+      window.removeEventListener('online', goOnline);
+      window.removeEventListener('offline', goOffline);
+    };
+  }, [refreshPending, syncQueue, toast]);
 
   useEffect(() => {
     coreService.campuses().then((data) => setCampuses(data.results || data)).catch(() => { });
@@ -47,8 +167,8 @@ export default function AccessVerificationPage() {
       .catch(() => { });
   }, []);
 
-  function buildPayload() {
-    const query = form.query.trim();
+  function buildPayload(rawQuery = form.query) {
+    const query = rawQuery.trim();
     const payload = {
       movement: form.movement,
       campus: form.campus,
@@ -62,26 +182,90 @@ export default function AccessVerificationPage() {
     return payload;
   }
 
+  /** Envía la verificación al backend y refleja el resultado en pantalla. */
+  const verifyQuery = useCallback(
+    async (query) => {
+      const limpio = (query || '').trim();
+      if (!limpio) {
+        toast.warning('Introduzca un código QR, número de solapín o CI.');
+        return;
+      }
+      setLoading(true);
+      setResult(null);
+      const payload = buildPayload(limpio);
+
+      // SIN CONEXIÓN (RF-04.6 / RNF-09): el movimiento se encola en IndexedDB
+      // para enviarlo en cuanto vuelva la red, sin bloquear al guardia.
+      if (!isOnline()) {
+        try {
+          const saved = await enqueueVerification(payload);
+          setResult({
+            allowed: null,
+            offline: true,
+            reason: 'OFFLINE',
+            message: 'Verificación guardada offline. Pendiente por sincronizar',
+            client_uuid: saved.client_uuid,
+            occurred_at: saved.occurred_at,
+            movement: saved.movement,
+            identifier: saved.qr_token || saved.badge_number || saved.identity_card,
+          });
+          refreshPending();
+          toast.warning('Verificación guardada offline. Pendiente por sincronizar');
+          setForm((prev) => ({ ...prev, query: '', observed: '' }));
+        } catch (error) {
+          toast.error(
+            `No se pudo guardar sin conexión: ${error?.message || 'almacenamiento no disponible.'}`,
+          );
+        } finally {
+          setLoading(false);
+        }
+        return;
+      }
+
+      try {
+        const data = await accessService.verify(payload);
+        setResult(data);
+        if (data.allowed) toast.success(`Acceso permitido a ${data.badge?.user_detail?.full_name}`);
+        else toast.error(`Acceso denegado: ${REASONS[data.reason] || data.message}`);
+        setForm((prev) => ({ ...prev, query: '', observed: '' }));
+      } catch (error) {
+        toast.error(parseApiError(error));
+      } finally {
+        setLoading(false);
+      }
+    },
+    // buildPayload sólo depende de `form`; el toast y el servicio son estables.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [form],
+  );
+
   async function handleSubmit(event) {
     event.preventDefault();
-    if (!form.query.trim()) {
-      toast.warning('Introduzca un código QR, número de solapín o CI.');
-      return;
-    }
-    setLoading(true);
-    setResult(null);
-    try {
-      const data = await accessService.verify(buildPayload());
-      setResult(data);
-      if (data.allowed) toast.success(`Acceso permitido a ${data.badge?.user_detail?.full_name}`);
-      else toast.error(`Acceso denegado: ${REASONS[data.reason] || data.message}`);
-      setForm((prev) => ({ ...prev, query: '', observed: '' }));
-    } catch (error) {
-      toast.error(parseApiError(error));
-    } finally {
-      setLoading(false);
-    }
+    await verifyQuery(form.query);
   }
+
+  // Al decodificar se cierra el modal: se remonta el escáner en la próxima
+  // apertura para arrancar la cámara limpia (evita reutilizar un lector parado).
+  const closeScanner = useCallback(() => {
+    setScannerOpen(false);
+    setScannerKey((value) => value + 1);
+  }, []);
+
+
+
+  const handleScan = useCallback(
+    (decodedText) => {
+      closeScanner();
+      const identificador = extractIdentifier(decodedText);
+      if (!identificador) {
+        toast.error('El código leído no contiene un identificador válido.');
+        return;
+      }
+      setForm((prev) => ({ ...prev, query: identificador }));
+      verifyQuery(identificador);
+    },
+    [verifyQuery, toast, closeScanner],
+  );
 
   const person = result?.badge?.user_detail;
 
@@ -94,6 +278,29 @@ export default function AccessVerificationPage() {
 
       <div className="grid gap-5 lg:grid-cols-5">
         <form onSubmit={handleSubmit} className="card p-5 lg:col-span-2">
+          <div
+            className={`mb-3 flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-xs ${
+              online ? 'bg-emerald-50 text-emerald-800' : 'bg-amber-50 text-amber-800'
+            }`}
+          >
+            <span className="flex items-center gap-2 font-medium">
+              <span
+                className={`h-2 w-2 rounded-full ${online ? 'bg-emerald-500' : 'bg-amber-500'}`}
+              />
+              {online ? 'En línea' : 'Sin conexión · modo offline'}
+            </span>
+            <button
+              type="button"
+              className="inline-flex items-center gap-1 rounded-md border border-current/30 px-2 py-1 font-semibold disabled:opacity-50"
+              onClick={() => syncQueue()}
+              disabled={syncing || !online || pending === 0}
+              title="Enviar las verificaciones guardadas sin conexión"
+            >
+              <Icon name="refresh" size={12} />
+              {syncing ? 'Sincronizando…' : `Sincronizar (${pending})`}
+            </button>
+          </div>
+
           <div className="mb-4 rounded-xl border-2 border-dashed border-brand-200 bg-brand-50/50 p-6 text-center">
             <Icon name="qr" size={44} className="mx-auto text-brand-400" />
             <p className="mt-2 text-sm font-medium text-brand-700">Escanee o introduzca el código</p>
@@ -168,14 +375,80 @@ export default function AccessVerificationPage() {
             <Icon name="shield" size={16} /> {loading ? 'Verificando…' : 'Verificar acceso'}
           </button>
 
+          <button
+            type="button"
+            className="btn-secondary mt-2 w-full"
+            onClick={() => {
+              setScannerKey((value) => value + 1);
+              setScannerOpen(true);
+            }}
+            disabled={loading}
+          >
+            <Icon name="qr" size={16} /> Escanear QR con Cámara
+          </button>
+
+
+
           <p className="mt-3 text-center text-xs text-brand-400">
             Canal: <span className="font-medium">{form.channel}</span> · Toda verificación queda
             registrada en la bitácora.
           </p>
+
+          {/* Aviso de contexto seguro: getUserMedia sólo existe en HTTPS o localhost. */}
+          {insecureCameraContext && (
+            <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
+              <Icon name="shield" size={14} className="mr-1 inline" />
+              La cámara sólo funciona en <strong>HTTPS</strong> o <strong>localhost</strong> (la
+              página actual no es un contexto seguro). Abra la app desde
+              <code>http://localhost:5173</code>, por port forwarding, o desde la URL
+              <strong>https</strong> del túnel que genera <code>scripts/tunel.sh</code>.
+            </p>
+          )}
         </form>
 
         <div className="lg:col-span-3">
           <div className="card flex h-full min-h-[420px] flex-col items-center justify-center p-6">
+            {result?.offline ? (
+              <div className="w-full animate-fade-in">
+                <div className="mb-5 flex items-center gap-3 rounded-xl bg-amber-50 p-4 text-amber-800">
+                  <span className="flex h-11 w-11 items-center justify-center rounded-full bg-white/70">
+                    <Icon name="clock" size={22} />
+                  </span>
+                  <div>
+                    <p className="font-display text-lg font-semibold">Verificación guardada offline</p>
+                    <p className="text-sm opacity-80">Pendiente por sincronizar</p>
+                  </div>
+                </div>
+                <dl className="grid gap-2 text-sm sm:grid-cols-2">
+                  <div>
+                    <dt className="text-xs text-brand-400">Identificador leído</dt>
+                    <dd className="mono break-all">{result.identifier || '—'}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-brand-400">Movimiento</dt>
+                    <dd>{result.movement === 'SALIDA' ? 'Salida' : 'Entrada'}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-brand-400">Guardado el</dt>
+                    <dd>{formatDateTime(result.occurred_at)}</dd>
+                  </div>
+                  <div>
+                    <dt className="text-xs text-brand-400">En cola</dt>
+                    <dd>{pending} pendiente(s)</dd>
+                  </div>
+                </dl>
+                <button
+                  type="button"
+                  className="btn-secondary mt-4 w-full"
+                  onClick={() => syncQueue()}
+                  disabled={!online || syncing}
+                >
+                  <Icon name="refresh" size={16} />
+                  {online ? `Sincronizar (${pending})` : 'Esperando conexión…'}
+                </button>
+              </div>
+            ) : null}
+
             {!result && !loading && (
               <div className="text-center">
                 <div className="mx-auto flex h-16 w-16 items-center justify-center rounded-full bg-brand-50 text-brand-400">
@@ -192,7 +465,7 @@ export default function AccessVerificationPage() {
               <div className="h-10 w-10 animate-spin rounded-full border-4 border-brand-100 border-t-brand-700" />
             )}
 
-            {result && (
+            {result && !result.offline && (
               <div className="w-full animate-fade-in">
                 <div
                   className={`mb-5 flex items-center gap-3 rounded-xl p-4 ${result.allowed
@@ -257,6 +530,22 @@ export default function AccessVerificationPage() {
           </div>
         </div>
       </div>
+
+      <Modal
+        open={scannerOpen}
+        onClose={closeScanner}
+        title="Escanear QR con la cámara"
+        description="Acerque el QR del solapín a la cámara. La verificación se enviará automáticamente."
+        footer={
+          <button type="button" className="btn-secondary" onClick={closeScanner}>
+            Cancelar
+          </button>
+        }
+      >
+        {scannerOpen && (
+          <QrScanner key={scannerKey} onDecode={handleScan} />
+        )}
+      </Modal>
     </PageContainer>
   );
 }
