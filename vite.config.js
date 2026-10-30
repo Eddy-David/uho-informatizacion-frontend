@@ -20,7 +20,50 @@ import { VitePWA } from 'vite-plugin-pwa';
  * - Túnel HTTPS de desarrollo (`scripts/tunel.sh`): no se activa TLS aquí; sólo
  *   se acepta el `Host` que llega por el túnel (`TUNNEL_FRONTEND_URL`), porque
  *   sin él Vite responde "Blocked request. This host is not allowed".
+ * - `tunnelHeadersPlugin`: pasa al cliente la URL del túnel (en desarrollo) y
+ *   responde `bypass-tunnel-reminder` para saltar la página de advertencia de
+ *   localtunnel, que si no tapa el login y la cámara.
  */
+const TUNNEL_HEADER = 'bypass-tunnel-reminder';
+
+/** Rutas que Vite sirve tal cual (entrada JSON con la URL del túnel). */
+function tunnelEnvPlugin() {
+  return {
+    name: 'sigacu-tunnel-env',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use('/env.js', (req, res) => {
+        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+        res.setHeader('Cache-Control', 'no-store');
+        res.setHeader(TUNNEL_HEADER, '1');
+        res.end(
+          `window.__SIGACU_TUNNEL__ = ${JSON.stringify({
+            origin: process.env.TUNNEL_FRONTEND_URL || '',
+          })};\n`,
+        );
+      });
+    },
+  };
+}
+
+/** Cabecera que evita la pantalla de aviso del túnel en cada petición. */
+function tunnelHeadersPlugin() {
+  const middleware = (req, res, next) => {
+    res.setHeader(TUNNEL_HEADER, '1');
+    next();
+  };
+  return {
+    name: 'sigacu-tunnel-headers',
+    apply: 'serve',
+    configureServer(server) {
+      server.middlewares.use(middleware);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(middleware);
+    },
+  };
+}
+
 const DOCS_HOST = process.env.VITE_ALLOWED_HOST || '192.168.1.27';
 const DEV_PORT = Number(process.env.VITE_PORT || 5173);
 // Host público del túnel (`https://yyyy.loca.lt` → `yyyy.loca.lt`).
@@ -38,6 +81,8 @@ const DEV_ORIGINS = [
 
 export default defineConfig({
   plugins: [
+    tunnelHeadersPlugin(),
+    tunnelEnvPlugin(),
     react(),
     VitePWA({
       registerType: 'autoUpdate',
@@ -93,6 +138,8 @@ export default defineConfig({
       '/api': {
         target: process.env.VITE_PROXY_TARGET || 'http://localhost:8000',
         changeOrigin: true,
+        // Responde `bypass-tunnel-reminder` también en las respuestas de la API.
+        headers: { [TUNNEL_HEADER]: '1' },
       },
       '/media': {
         target: process.env.VITE_PROXY_TARGET || 'http://localhost:8000',

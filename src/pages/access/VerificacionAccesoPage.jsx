@@ -19,6 +19,13 @@ import {
 } from '@/utils';
 
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
+const CI_RE = /^\d{11}$/;
+const BADGE_NUMBER_RE = /^UHO-[A-Z0-9-]+$/;
+//: Estados posibles de un solapín (Badge.Status del backend).
+const ESTADOS_SOLAPIN = ['ACTIVO', 'INACTIVO', 'SUSPENDIDO', 'CANCELADO', 'VENCIDO'];
+
+/** Mensaje único cuando el código leído no es de un solapín SIGACU. */
+export const INVALID_QR_MESSAGE = 'Código QR no válido, no pertenece a SIGACU';
 
 /**
  * La cámara (`getUserMedia`) sólo está disponible en contextos seguros.
@@ -33,23 +40,44 @@ function isInsecureCameraContext() {
 /**
  * Extrae el identificador del contenido leído del QR (RF-04.1).
  *
- * El QR del solapín codifica ``{"uuid": "…", "estado": "ACTIVO"}`` (RF-03.9),
- * pero también se aceptan el UUID en texto plano o el número de solapín, para
- * que códigos antiguos o impresos sigan funcionando.
+ * Sólo se aceptan tres formatos, cualquiera otro se rechaza (`''`) para que la
+ * página avise y **no** envíe la verificación:
+ *
+ * 1. El JSON del solapín ``{"uuid": "<UUID>", "estado": "<ESTADO>"}``
+ *    (RF-03.9) con un UUID válido y un estado conocido; si trae cualquier otra
+ *    clave/dato, o no es un estado de solapín, se rechaza.
+ * 2. Un UUID desnudo (códigos impresos de versiones anteriores).
+ * 3. El CI de 11 dígitos o el número de solapín ``UHO-…``.
  */
 export function extractIdentifier(decodedText) {
   const texto = (decodedText || '').trim();
   if (!texto) return '';
-  const uuid = texto.match(UUID_RE)?.[0];
-  if (uuid) return uuid.toLowerCase();
-  try {
-    const json = JSON.parse(texto);
-    const fromJson = String(json?.uuid || json?.codigo_qr || '').trim();
-    if (fromJson) return fromJson.toLowerCase();
-  } catch {
-    // No era JSON: puede ser un número de solapín o un CI.
+
+  if (texto.startsWith('{')) {
+    try {
+      const json = JSON.parse(texto);
+      // Debe ser un objeto con exactamente las claves del solapín (RF-03.9).
+      if (!json || typeof json !== 'object' || Array.isArray(json)) return '';
+      const claves = Object.keys(json).sort().join(',');
+      if (claves !== 'estado,uuid') return '';
+      const uuid = String(json.uuid || '').trim();
+      const estado = String(json.estado || '').trim().toUpperCase();
+      // UUID válido y completo (no basta con que contenga uno).
+      if (uuid.length !== 36 || UUID_RE.exec(uuid)?.[0] !== uuid) return '';
+      if (!ESTADOS_SOLAPIN.includes(estado)) return '';
+      return uuid.toLowerCase();
+    } catch {
+      return '';
+    }
   }
-  return texto.toUpperCase().startsWith('UHO-') ? texto.toUpperCase() : texto;
+
+  if (UUID_RE.exec(texto)?.[0] === texto) {
+    return texto.toLowerCase();
+  }
+  if (CI_RE.test(texto)) return texto;
+  const solapin = texto.toUpperCase();
+  if (BADGE_NUMBER_RE.test(solapin)) return solapin;
+  return '';
 }
 
 const REASONS = {
@@ -176,7 +204,7 @@ export default function AccessVerificationPage() {
       observed: form.observed,
       access_point: form.access_point || undefined,
     };
-    if (/^\d{11}$/.test(query)) payload.identity_card = query;
+    if (CI_RE.test(query)) payload.identity_card = query;
     else if (query.toUpperCase().startsWith('UHO-')) payload.badge_number = query;
     else payload.qr_token = query;
     return payload;
@@ -258,7 +286,8 @@ export default function AccessVerificationPage() {
       closeScanner();
       const identificador = extractIdentifier(decodedText);
       if (!identificador) {
-        toast.error('El código leído no contiene un identificador válido.');
+        // QR ajeno a SIGACU: se avisa y NO se llama a la API.
+        toast.error(INVALID_QR_MESSAGE);
         return;
       }
       setForm((prev) => ({ ...prev, query: identificador }));
@@ -399,9 +428,9 @@ export default function AccessVerificationPage() {
             <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
               <Icon name="shield" size={14} className="mr-1 inline" />
               La cámara sólo funciona en <strong>HTTPS</strong> o <strong>localhost</strong> (la
-              página actual no es un contexto seguro). Abra la app desde
-              <code>http://localhost:5173</code>, por port forwarding, o desde la URL
-              <strong>https</strong> del túnel que genera <code>scripts/tunel.sh</code>.
+              página actual no es un contexto seguro). Para el móvil abra la URL
+              <strong>https</strong> que imprime <code>./scripts/tunel.sh</code>; en la laptop,
+              use <code>http://localhost:5173</code>.
             </p>
           )}
         </form>

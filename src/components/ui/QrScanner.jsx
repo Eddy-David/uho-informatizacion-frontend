@@ -14,8 +14,8 @@ export function insecureContextReason() {
   if (window.isSecureContext) return '';
   if (window.location.protocol === 'https:' || window.location.hostname === 'localhost') return '';
   return (
-    'La cámara está bloqueada porque la página no está en un contexto seguro (HTTPS). ' +
-    'Abra la app desde el túnel HTTPS (scripts/tunel.sh) o desde localhost con port forwarding.'
+    'La cámara está bloqueada porque la página no se abrió por HTTPS. ' +
+    'Desde el móvil abra la URL https que imprime ./scripts/tunel.sh; en la laptop use localhost.'
   );
 }
 
@@ -27,7 +27,7 @@ function CameraErrorBox({ message }) {
   return (
     <div
       role="alert"
-      className="flex h-[300px] w-full flex-col items-center justify-center gap-3 rounded-lg border border-red-200 bg-red-50 px-4 text-center"
+      className="flex min-h-[300px] w-full flex-col items-center justify-center gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-6 text-center"
     >
       <span className="flex h-12 w-12 items-center justify-center rounded-full bg-white text-red-600">
         <Icon name="shield" size={24} />
@@ -88,7 +88,6 @@ function describeError(err) {
  */
 export default function QrScanner({ onDecode }) {
   const containerId = `qr-reader-${useId().replace(/[:]/g, '')}`;
-  const scannerRef = useRef(null);
   const decodedRef = useRef(false);
   const [status, setStatus] = useState('starting'); // starting | scanning | error | stopped
   // Un único mensaje de error (string), nunca una lista: se reemplaza al
@@ -134,7 +133,6 @@ export default function QrScanner({ onDecode }) {
         formatsToSupport: [Html5QrcodeSupportedFormats.QR_CODE],
         verbose: false,
       });
-      scannerRef.current = scanner;
     } catch (err) {
       // El contenedor no existe o la librería no pudo montarse: nunca dejar la pantalla en blanco.
       console.error('[QrScanner] No se pudo crear el escáner:', err);
@@ -183,7 +181,6 @@ export default function QrScanner({ onDecode }) {
 
     return () => {
       cancelled = true;
-      scannerRef.current = null;
       // `stop()` sólo es válido si la cámara llegó a arrancar; si no, `clear()`
       // es suficiente y evita el error "Cannot stop, scanner is not running".
       const cleanup = async () => {
@@ -213,7 +210,7 @@ export default function QrScanner({ onDecode }) {
       {status !== 'error' ? (
         <div
           id={containerId}
-          className="h-[300px] w-full min-h-[300px] overflow-hidden rounded-lg bg-black [&_canvas]:h-full [&_canvas]:w-full [&_video]:h-full [&_video]:w-full [&_video]:object-cover"
+          className="min-h-[300px] w-full overflow-hidden rounded-lg bg-black [&_canvas]:h-full [&_canvas]:w-full [&_video]:h-full [&_video]:w-full [&_video]:object-cover"
         />
       ) : (
         <CameraErrorBox message={message} />
@@ -229,6 +226,14 @@ export default function QrScanner({ onDecode }) {
       {status === 'scanning' && (
         <p className="flex items-center justify-center gap-2 text-sm text-brand-500">
           <Icon name="qr" size={16} /> Apunte la cámara al QR del solapín
+        </p>
+      )}
+
+      {/* Tras una lectura se detiene la cámara: el cuadro se vuelve negro, así
+          que se explica en texto qué ocurrió y qué hacer a continuación. */}
+      {status === 'stopped' && (
+        <p className="flex items-center justify-center gap-2 text-sm text-brand-500">
+          <Icon name="check" size={16} /> Código leído. Cierre este cuadro para escanear otro.
         </p>
       )}
 

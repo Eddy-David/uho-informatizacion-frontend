@@ -13,9 +13,16 @@
 const tunnelApiBaseUrl = (import.meta.env.VITE_TUNNEL_API_BASE_URL || '').trim();
 /**
  * Origen público del frontend (`https://yyyy.loca.lt`), sin ruta final.
- * Sirve para saber cuándo la app se está abriendo a través del túnel.
+ * En desarrollo lo sirve `vite.config.js` en `/env.js` (la URL del túnel la
+ * conoce el servidor, no el build); la variable VITE_* queda como respaldo.
  */
-const tunnelOrigin = (import.meta.env.VITE_TUNNEL_ORIGIN || '').trim().replace(/\/+$/, '');
+const tunnelOrigin = (
+  (typeof window !== 'undefined' && window.__SIGACU_TUNNEL__?.origin) ||
+  import.meta.env.VITE_TUNNEL_ORIGIN ||
+  ''
+)
+  .trim()
+  .replace(/\/+$/, '');
 
 /**
  * ¿La página actual se está sirviendo por el túnel público?
@@ -34,9 +41,10 @@ function viaTunnel() {
 }
 
 function resolveApiBaseUrl() {
-  const explicit = (import.meta.env.VITE_API_BASE_URL || '').trim();
-  if (viaTunnel() && tunnelApiBaseUrl) return tunnelApiBaseUrl;
-  return explicit || '/api/v1';
+  // Por el túnel la API va con ruta relativa: mismo origen HTTPS, sin CORS ni
+  // contenido mixto (la cabecera `bypass-tunnel-reminder` va en el proxy).
+  if (viaTunnel()) return tunnelApiBaseUrl || '/api/v1';
+  return (import.meta.env.VITE_API_BASE_URL || '').trim() || '/api/v1';
 }
 
 export const env = {
