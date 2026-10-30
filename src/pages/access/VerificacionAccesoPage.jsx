@@ -427,10 +427,10 @@ export default function AccessVerificationPage() {
           {insecureCameraContext && (
             <p className="mt-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800">
               <Icon name="shield" size={14} className="mr-1 inline" />
-              La cámara sólo funciona en <strong>HTTPS</strong> o <strong>localhost</strong> (la
-              página actual no es un contexto seguro). Para el móvil abra la URL
-              <strong>https</strong> que imprime <code>./scripts/tunel.sh</code>; en la laptop,
-              use <code>http://localhost:5173</code>.
+              <strong>La cámara requiere HTTPS. Use el enlace del túnel.</strong> La página actual
+              no es un contexto seguro. En el móvil abra la URL <strong>https</strong> que imprime
+              <code>./scripts/tuneles.sh</code>; en la laptop use
+              <code>http://localhost:5173</code>.
             </p>
           )}
         </form>

@@ -6,8 +6,8 @@
 /**
  * URL del backend que usa el móvil a través del túnel HTTPS.
  *
- * `scripts/tunel.sh` escribe `https://xxxx.loca.lt` en `.env` y añade el
- * sufijo `/api/v1`. Se usa sólo cuando la app se abre desde el origen del túnel
+ * `scripts/tuneles.sh` escribe `https://xxxx.loca.lt/api/v1` en `.env`. Se usa
+ * sólo cuando la app se abre desde el origen del túnel del frontend
  * (ver más abajo); en `localhost` se mantiene el proxy `/api` de Vite.
  */
 const tunnelApiBaseUrl = (import.meta.env.VITE_TUNNEL_API_BASE_URL || '').trim();

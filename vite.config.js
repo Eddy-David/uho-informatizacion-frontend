@@ -17,7 +17,7 @@ import { VitePWA } from 'vite-plugin-pwa';
  * - `DOCS_HOST`: origen del otro servidor de Vite que se lanza con
  *   `scripts/start_server.sh` (5173). Sin él, Vite rechaza por CORS/Host los
  *   recursos cruzados entre ambos puertos y la página queda en blanco.
- * - Túnel HTTPS de desarrollo (`scripts/tunel.sh`): no se activa TLS aquí; sólo
+ * - Túnel HTTPS de desarrollo (`scripts/tuneles.sh`): no se activa TLS aquí; sólo
  *   se acepta el `Host` que llega por el túnel (`TUNNEL_FRONTEND_URL`), porque
  *   sin él Vite responde "Blocked request. This host is not allowed".
  * - `tunnelHeadersPlugin`: pasa al cliente la URL del túnel (en desarrollo) y

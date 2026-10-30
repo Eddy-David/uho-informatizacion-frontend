@@ -14,16 +14,19 @@ export function insecureContextReason() {
   if (window.isSecureContext) return '';
   if (window.location.protocol === 'https:' || window.location.hostname === 'localhost') return '';
   return (
-    'La cámara está bloqueada porque la página no se abrió por HTTPS. ' +
-    'Desde el móvil abra la URL https que imprime ./scripts/tunel.sh; en la laptop use localhost.'
+    'La cámara requiere HTTPS. Use el enlace del túnel: desde el móvil abra la URL https que ' +
+    'imprime ./scripts/tuneles.sh; en la laptop use localhost.'
   );
 }
+
+/** Título fijo para los errores de contexto inseguro (causa y solución). */
+export const INSECURE_CONTEXT_TITLE = 'La cámara requiere HTTPS. Use el enlace del túnel';
 
 /** Mensaje de error del contexto inseguro, reutilizado por la página y el modal. */
 export const INSECURE_CONTEXT_MESSAGE = insecureContextReason();
 
 /** Bloque que sustituye el cuadro negro del vídeo cuando la cámara no arranca. */
-function CameraErrorBox({ message }) {
+function CameraErrorBox({ title, message }) {
   return (
     <div
       role="alert"
@@ -32,7 +35,7 @@ function CameraErrorBox({ message }) {
       <span className="flex h-12 w-12 items-center justify-center rounded-full bg-white text-red-600">
         <Icon name="shield" size={24} />
       </span>
-      <p className="text-sm font-medium text-red-700">No se pudo abrir la cámara</p>
+      <p className="text-sm font-medium text-red-700">{title}</p>
       <p className="text-xs text-red-600">{message}</p>
       <p className="text-xs text-brand-400 break-all">{window.location.origin}</p>
     </div>
@@ -66,7 +69,7 @@ function describeError(err) {
     !navigator.mediaDevices?.getUserMedia ||
     !window.isSecureContext
   ) {
-    return 'No se pudo acceder a la cámara: el navegador la bloquea fuera de HTTPS (use localhost).';
+    return 'La cámara requiere HTTPS. Use el enlace del túnel (https) en el móvil; en la laptop use localhost.';
   }
   const detalle = name || err?.message;
   return `No se pudo acceder a la cámara. Verifique los permisos${
@@ -124,7 +127,12 @@ export default function QrScanner({ onDecode }) {
     }
 
     if (!hasMediaDevices()) {
-      fail('No se pudo acceder a la cámara: el navegador no expone getUserMedia en esta página.');
+      // Sin `getUserMedia` la causa habitual es un contexto no seguro (http://).
+      if (typeof navigator === 'undefined' || !navigator.mediaDevices?.getUserMedia) {
+        fail('La cámara requiere HTTPS. Use el enlace del túnel (https) en el móvil.');
+      } else {
+        fail('No se pudo acceder a la cámara: el navegador no expone getUserMedia en esta página.');
+      }
       return undefined;
     }
 
@@ -210,10 +218,10 @@ export default function QrScanner({ onDecode }) {
       {status !== 'error' ? (
         <div
           id={containerId}
-          className="min-h-[300px] w-full overflow-hidden rounded-lg bg-black [&_canvas]:h-full [&_canvas]:w-full [&_video]:h-full [&_video]:w-full [&_video]:object-cover"
+          className="min-h-[300px] w-full overflow-hidden rounded-lg bg-black [&_canvas]:h-full [&_canvas]:w-full [&_video]:h-full [&_video]:min-h-[300px] [&_video]:w-full [&_video]:object-cover"
         />
       ) : (
-        <CameraErrorBox message={message} />
+        <CameraErrorBox title={insecure ? INSECURE_CONTEXT_TITLE : 'No se pudo abrir la cámara'} message={message} />
       )}
 
       {status === 'starting' && !insecure && (
