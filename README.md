@@ -67,7 +67,9 @@ Solo las variables con prefijo `VITE_` llegan al navegador. Consulte
 | `npm run dev` | Servidor de desarrollo con recarga en caliente (puerto 5173) |
 | `npm run build` | Compilación de producción en `dist/` |
 | `npm run preview` | Sirve la compilación localmente para verificarla |
+| `npm test` | Pruebas de la cola offline (RF-04.5 / RNF-09), sin navegador |
 | `npm run lint` | ESLint sobre `src/` |
+| `npm test` | Pruebas de la cola offline (RF-04.5 / RNF-09) con `node --test` |
 | `npm run format` | Prettier sobre `src/**/*.{js,jsx,css}` |
 
 Antes de cada *commit*: `npm run lint && npm run build`.

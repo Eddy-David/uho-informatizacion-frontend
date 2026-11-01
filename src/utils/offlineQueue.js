@@ -81,16 +81,23 @@ function deviceInfo() {
  * @returns {Promise<object>} el elemento guardado
  */
 export async function enqueueVerification(payload, extra = {}) {
+  // RF-04.5: `occurred_at` es la hora del ESCANEO. `handleScan` la envía en el
+  // payload en el instante de leer el QR; si no llega, se toma la de encolado.
+  // El lote se envía minutos u horas después (al volver la red) y
+  // `toSyncPayload` transporta este valor, nunca la hora de sincronización.
+  const nowIso = new Date().toISOString();
+  const createdAt = Date.now();
   const item = {
+    ...payload,
+    ...extra,
     client_uuid:
       typeof crypto !== 'undefined' && crypto.randomUUID
         ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    occurred_at: new Date().toISOString(),
-    created_at: Date.now(),
+        : `${createdAt}-${Math.random().toString(16).slice(2)}`,
     device_info: payload.device_info || deviceInfo(),
-    ...payload,
-    ...extra,
+    // Después de las extensiones para que nada pueda sobrescribir la auditoría.
+    occurred_at: payload.occurred_at || nowIso,
+    created_at: createdAt,
   };
   await withStore('readwrite', (store) => store.put(item));
   return item;

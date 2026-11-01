@@ -5,7 +5,15 @@
   <meta charset="UTF-8" />
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <meta name="theme-color" content="#14305c" />
+  <meta name="theme-color" content="#14305C" />
+  <!-- PWA (RF-04.6): el manifest y el Service Worker los inyectan
+       `npm run build` (VitePWA) y, en dev/preview, `vite.config.js`. -->
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="apple-touch-icon" sizes="180x180" href="/icon-192.png" />
+  <meta name="mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-title" content="SIGACU" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
   <meta name="description"
     content="SIGACU — Sistema de Desarrollo para el Proceso de Informatización de la Universidad de Holguín" />
   <title>SIGACU · Universidad de Holguín</title>
@@ -18,9 +26,11 @@
 
 <body class="bg-surface text-brand-900 antialiased">
   <div id="root"></div>
-  <!-- Sólo lo sirve el dev server (scripts/tunel.sh): URL pública del túnel. -->
-  <script src="/env.js"></script>
+  <!-- Sólo lo sirve el dev server / preview (vite.config.js): URL pública del
+       túnel. `onerror` evita un 404 en consola si se sirve como estáticos. -->
+  <script src="/env.js" onerror="this.remove()"></script>
   <script type="module" src="/src/main.jsx"></script>
+  <noscript>Active JavaScript para usar SIGACU.</noscript>
 </body>
 
 </html>

@@ -212,7 +212,7 @@ export default function AccessVerificationPage() {
 
   /** Envía la verificación al backend y refleja el resultado en pantalla. */
   const verifyQuery = useCallback(
-    async (query) => {
+    async (query, { scannedAt = new Date().toISOString() } = {}) => {
       const limpio = (query || '').trim();
       if (!limpio) {
         toast.warning('Introduzca un código QR, número de solapín o CI.');
@@ -226,7 +226,8 @@ export default function AccessVerificationPage() {
       // para enviarlo en cuanto vuelva la red, sin bloquear al guardia.
       if (!isOnline()) {
         try {
-          const saved = await enqueueVerification(payload);
+          // `occurred_at` viaja con la hora del escaneo (RF-04.5), no la del envío.
+          const saved = await enqueueVerification({ ...payload, occurred_at: scannedAt });
           setResult({
             allowed: null,
             offline: true,
@@ -291,7 +292,8 @@ export default function AccessVerificationPage() {
         return;
       }
       setForm((prev) => ({ ...prev, query: identificador }));
-      verifyQuery(identificador);
+      // La hora se marca al leer el QR, antes de cualquier llamada de red.
+      verifyQuery(identificador, { scannedAt: new Date().toISOString() });
     },
     [verifyQuery, toast, closeScanner],
   );

@@ -1,3 +1,5 @@
+import { existsSync, readFileSync, statSync } from 'node:fs';
+import { basename, extname, resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
@@ -20,28 +22,48 @@ import { VitePWA } from 'vite-plugin-pwa';
  * - Túnel HTTPS de desarrollo (`scripts/tuneles.sh`): no se activa TLS aquí; sólo
  *   se acepta el `Host` que llega por el túnel (`TUNNEL_FRONTEND_URL`), porque
  *   sin él Vite responde "Blocked request. This host is not allowed".
- * - `tunnelHeadersPlugin`: pasa al cliente la URL del túnel (en desarrollo) y
- *   responde `bypass-tunnel-reminder` para saltar la página de advertencia de
- *   localtunnel, que si no tapa el login y la cámara.
+ * - `tunnelEnvPlugin`: pasa al cliente la URL del túnel. Se aplica también al
+ *   build/preview (`apply: 'serve'` cubre dev y preview) porque el túnel puede
+ *   apuntar a `vite preview` (producción): sin `/env.js` el móvil no sabría
+ *   que está detrás del túnel y llamaría a la API por el origen equivocado.
+ * - `bypass-tunnel-reminder` se mantiene por compatibilidad: cloudflared no lo
+ *   usa, pero no molesta y cubre un túnel de localtunnel heredado.
+ * - `buildStaticPlugin`: `tuneles.sh` publica el puerto 5173, que es donde
+ *   escuchan `npm run dev` y `npm run preview`. Vite no sirve `dist/` por sí
+ *   solo, así que tras un build el túnel mostraba un 404 (sin manifest ni SW →
+ *   la PWA no era instalable). Con el build presente, el dev server y el
+ *   preview entregan `index.html`, `/manifest.webmanifest`, `/sw.js` y los
+ *   assets del build, y sólo quedan en manos de Vite `/src/*` (transformación
+ *   en vivo, modo desarrollo) y los proxies `/api`, `/media` y `/ws`.
+ * - El mismo plugin inyecta en el HTML el manifest, el registro del Service
+ *   Worker y `apple-touch-icon`: en dev/preview Vite no aplica la
+ *   autotransformación de `VitePWA` (sólo al compilar), y iPhone/iPad no leen
+ *   el manifest, necesitan las etiquetas `apple-*`.
  */
 const TUNNEL_HEADER = 'bypass-tunnel-reminder';
 
 /** Rutas que Vite sirve tal cual (entrada JSON con la URL del túnel). */
 function tunnelEnvPlugin() {
+  const middleware = (req, res, next) => {
+    if ((req.url || '').split('?')[0] !== '/env.js') return next();
+    res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    res.setHeader(TUNNEL_HEADER, '1');
+    res.end(
+      `window.__SIGACU_TUNNEL__ = ${JSON.stringify({
+        origin: process.env.TUNNEL_FRONTEND_URL || '',
+      })};\n`,
+    );
+  };
   return {
     name: 'sigacu-tunnel-env',
+    // `serve` incluye el dev server y `vite preview` (build de producción).
     apply: 'serve',
     configureServer(server) {
-      server.middlewares.use('/env.js', (req, res) => {
-        res.setHeader('Content-Type', 'application/javascript; charset=utf-8');
-        res.setHeader('Cache-Control', 'no-store');
-        res.setHeader(TUNNEL_HEADER, '1');
-        res.end(
-          `window.__SIGACU_TUNNEL__ = ${JSON.stringify({
-            origin: process.env.TUNNEL_FRONTEND_URL || '',
-          })};\n`,
-        );
-      });
+      server.middlewares.use(middleware);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(middleware);
     },
   };
 }
@@ -62,6 +84,119 @@ function tunnelHeadersPlugin() {
       server.middlewares.use(middleware);
     },
   };
+}
+
+/**
+ * Sirve el build de `dist/` desde `npm run dev` y `npm run preview` para que
+ * el túnel (un solo puerto) publique una PWA instalable.
+ *
+ * Reglas:
+ *   - `/src/*`, `/@vite/*`, `/@react-refresh`, `/__vite_ping` y los proxies
+ *     (`/api`, `/media`, `/ws`) siguen siendo de Vite.
+ *   - Cualquier otra ruta se busca en `dist/` (manifest, SW, íconos, assets con
+ *     hash). Si no existe, se devuelve `index.html` (rutas del SPA).
+ *   - En HTML se añaden las etiquetas que `VitePWA` sólo inyecta al compilar:
+ *     manifest, `apple-touch-icon`, meta de iOS y registro del Service Worker.
+ */
+function buildStaticPlugin() {
+  // Ruta absoluta de `dist/`; se fija en `configResolved`.
+  let distDir = '';
+  // El manifest ya está en `index.html`; al compilar también lo añade VitePWA.
+  const HEAD = [
+    '<link rel="apple-touch-icon" sizes="180x180" href="/icon-192.png" />',
+    '<meta name="mobile-web-app-capable" content="yes" />',
+    '<meta name="apple-mobile-web-app-capable" content="yes" />',
+    '<meta name="apple-mobile-web-app-title" content="SIGACU" />',
+    '<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />',
+  ].join('\n    ');
+  const SW = [
+    '<script type="module">',
+    "if ('serviceWorker' in navigator) {",
+    "  window.addEventListener('load', () => navigator.serviceWorker.register('/sw.js', { scope: '/' })",
+    "    .catch(() => {}));",
+    '}',
+    '</script>',
+  ].join('\n    ');
+
+  return {
+    name: 'sigacu-build-static',
+    // En `build` el HTML ya trae las etiquetas y VitePWA el registro del SW.
+    apply: 'serve',
+    configResolved(config) {
+      distDir = resolve(config.root, config.build.outDir || 'dist');
+    },
+    configureServer(server) {
+      server.middlewares.use(serveBuild);
+    },
+    configurePreviewServer(server) {
+      server.middlewares.use(serveBuild);
+    },
+  };
+
+  function serveBuild(req, res, next) {
+    const pathname = decodeURIComponent((req.url || '/').split('?')[0]);
+    if (!isAppRoute(pathname)) return next();
+    const file = resolve(distDir, `.${pathname}`);
+    // Nunca fuera de `dist/` ni el `index.html` original (vite lo transforma).
+    if (
+      file.startsWith(distDir) &&
+      basename(file) !== 'index.html' &&
+      existsSync(file) &&
+      statSync(file).isFile()
+    ) {
+      res.setHeader('Content-Type', mimeFor(file));
+      if (pathname === '/sw.js' || pathname === '/registerSW.js') {
+        res.setHeader('Cache-Control', 'no-store');
+      }
+      res.end(readFileSync(file));
+      return;
+    }
+    if (pathname === '/' || !extname(pathname)) {
+      const htmlPath = resolve(distDir, 'index.html');
+      if (!existsSync(htmlPath)) return next();
+      const html = readFileSync(htmlPath, 'utf8')
+        .replace('</head>', `    ${HEAD}\n  </head>`)
+        .replace('</body>', `    ${SW}\n  </body>`);
+      res.setHeader('Content-Type', 'text/html; charset=utf-8');
+      res.setHeader('Cache-Control', 'no-cache');
+      res.end(html);
+      return;
+    }
+    next();
+  }
+}
+
+/** ¿La ruta la debe atender el build (`dist/`)? */
+function isAppRoute(pathname) {
+  const VITE_INTERNAL = [/^\/src\//, /^\/@vite\//, /^\/@react-refresh/, /^\/@fs\//, /^\/@id\//];
+  const PROXIED = [/^\/api\//, /^\/media\//, /^\/ws\//, /^\/static\//, /^\/admin(\/|$)/];
+  const RESERVED = ['/env.js', '/__vite_ping', '/favicon.ico'];
+  return (
+    pathname !== '/' &&
+    !VITE_INTERNAL.some((re) => re.test(pathname)) &&
+    !PROXIED.some((re) => re.test(pathname)) &&
+    !RESERVED.includes(pathname)
+  );
+}
+
+function mimeFor(file) {
+  const ext = extname(file).toLowerCase();
+  return (
+    {
+      '.js': 'application/javascript; charset=utf-8',
+      '.mjs': 'application/javascript; charset=utf-8',
+      '.css': 'text/css; charset=utf-8',
+      '.json': 'application/json; charset=utf-8',
+      '.webmanifest': 'application/manifest+json; charset=utf-8',
+      '.html': 'text/html; charset=utf-8',
+      '.svg': 'image/svg+xml',
+      '.png': 'image/png',
+      '.webp': 'image/webp',
+      '.ico': 'image/x-icon',
+      '.woff2': 'font/woff2',
+      '.map': 'application/json; charset=utf-8',
+    }[ext] || 'application/octet-stream'
+  );
 }
 
 const DOCS_HOST = process.env.VITE_ALLOWED_HOST || '192.168.1.27';
@@ -86,9 +221,14 @@ export default defineConfig({
     react(),
     VitePWA({
       registerType: 'autoUpdate',
+      // Registro explícito: en el build lo inserta `injectRegister: 'script'`
+      // (a diferencia del módulo `virtual:pwa-register`, no vacía el DOM al
+      // recargarse en modo dev) y en dev/preview lo inyecta `buildStaticPlugin`.
+      injectRegister: 'script',
       includeAssets: ['favicon.svg', 'icon.svg', 'icon-192.png', 'icon-512.png'],
       manifest: {
-        name: 'SIGACU · Universidad de Holguín',
+        // RF-04.6: nombre exacto que muestra el instalador de Android/Chrome.
+        name: 'SIGACU - UHO',
         short_name: 'SIGACU',
         description:
           'Sistema de control de acceso de la Universidad de Holguín: solapines digitales y verificación en puntos de control.',
@@ -98,12 +238,13 @@ export default defineConfig({
         scope: '/',
         display: 'standalone',
         orientation: 'portrait',
-        theme_color: '#14305c',
+        theme_color: '#14305C',
         background_color: '#f5f7fb',
         icons: [
           { src: '/icon-192.png', sizes: '192x192', type: 'image/png', purpose: 'any' },
           { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'any' },
-          { src: '/icon-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
+          // `maskable` exige ~10 % de margen: se genera a partir de src/assets/maskable.svg.
+          { src: '/icon-maskable-512.png', sizes: '512x512', type: 'image/png', purpose: 'maskable' },
         ],
       },
       workbox: {
@@ -118,6 +259,7 @@ export default defineConfig({
       },
       devOptions: { enabled: false },
     }),
+    buildStaticPlugin(),
   ],
   resolve: {
     alias: {
@@ -139,11 +281,15 @@ export default defineConfig({
         target: process.env.VITE_PROXY_TARGET || 'http://localhost:8000',
         changeOrigin: true,
         // Responde `bypass-tunnel-reminder` también en las respuestas de la API.
-        headers: { [TUNNEL_HEADER]: '1' },
+        // `ngrok-skip-browser-warning` evita la página de aviso de ngrok
+        // (`*.ngrok-free.app`) para las llamadas de la app.
+        headers: { [TUNNEL_HEADER]: '1', 'ngrok-skip-browser-warning': '1' },
       },
       '/media': {
         target: process.env.VITE_PROXY_TARGET || 'http://localhost:8000',
         changeOrigin: true,
+        // Fotos y adjuntos tampoco deben recibir la página de aviso de ngrok.
+        headers: { 'ngrok-skip-browser-warning': '1' },
       },
       '/ws': {
         target: process.env.VITE_PROXY_TARGET || 'ws://localhost:8000',
@@ -154,7 +300,7 @@ export default defineConfig({
   },
   preview: {
     host: '0.0.0.0',
-    port: DEV_PORT,
+    port: Number(process.env.PREVIEW_PORT || 4173),
     allowedHosts: [DOCS_HOST, 'localhost', '127.0.0.1', ...(TUNNEL_HOST ? [TUNNEL_HOST] : []), true],
   },
   build: {
