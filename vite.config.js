@@ -1,8 +1,10 @@
+import { gzipSync } from 'node:zlib';
 import { existsSync, readFileSync, statSync } from 'node:fs';
 import { basename, extname, resolve } from 'node:path';
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 import { VitePWA } from 'vite-plugin-pwa';
+import { compression } from 'vite-plugin-compression2';
 
 /**
  * Configuración de Vite.
@@ -28,6 +30,11 @@ import { VitePWA } from 'vite-plugin-pwa';
  *   que está detrás del túnel y llamaría a la API por el origen equivocado.
  * - `bypass-tunnel-reminder` se mantiene por compatibilidad: cloudflared no lo
  *   usa, pero no molesta y cubre un túnel de localtunnel heredado.
+ * - `compression`: al compilar genera `*.gz` y `*.br` junto a cada asset. El
+ *   túnel sólo transporta los bytes, así que comprimir el JS/CSS reduce el
+ *   peso ~70 % en la carga inicial. Funciona por sí solo con Nginx (tunel.sh),
+ *   pero el `vite preview` de pruebas NO negocia `Accept-Encoding`: para
+ *   probarlo localmente se añade `previewCompressionPlugin` (gzip en memoria).
  * - `buildStaticPlugin`: `tuneles.sh` publica el puerto 5173, que es donde
  *   escuchan `npm run dev` y `npm run preview`. Vite no sirve `dist/` por sí
  *   solo, así que tras un build el túnel mostraba un 404 (sin manifest ni SW →
@@ -64,6 +71,82 @@ function tunnelEnvPlugin() {
     },
     configurePreviewServer(server) {
       server.middlewares.use(middleware);
+    },
+  };
+}
+
+/**
+ * Compresión gzip del `vite preview`.
+ *
+ * Vite 5 sirve `dist/` con `sirv` sin negociar `Accept-Encoding`, de modo que
+ * en `npm run preview` los `.gz` generados al compilar nunca se usaban y la
+ * prueba local no reflejaba el ahorro real. Este middleware comprime en memoria
+ * la respuesta de los assets (`*.html`, JS y CSS) a quien lo acepte, para medir
+ * el tamaño de transferencia que verá el móvil por el túnel sin depender de
+ * Chrome (que no negocia gzip en peticiones HTTP en claro).
+ */
+function previewCompressionPlugin() {
+  return {
+    name: 'sigacu-preview-compression',
+    apply: 'serve',
+    configurePreviewServer(server) {
+      server.middlewares.use((req, res, next) => {
+        const accept = String(req.headers['accept-encoding'] || '');
+        // `HEAD` no lleva cuerpo: pasa tal cual y conserva sus cabeceras.
+        if (req.method === 'HEAD' || !/\bgzip\b/.test(accept)) return next();
+        const pathname = (req.url || '').split('?')[0];
+        // Sólo texto comprimible. `sw.js`, `registerSW.js` y `workbox-*.js` se
+        // excluyen igual que en el build: Workbox los pide y hay que devolverlos
+        // tal cual. Las imágenes ya vienen comprimidas.
+        if (/\.(png|jpe?g|webp|ico|woff2?)$/i.test(pathname) || /(^|\/)(sw|registerSW|workbox[^/]*)\.js$/.test(pathname)) {
+          return next();
+        }
+        // Los datos del handler se capturan aquí y se reescriben al final, en
+        // `res.end`, cuando ya se conocen TODAS las cabeceras que fijó `sirv`
+        // (`sirv` las aplica con `setHeaders` justo antes de `writeHead`, así
+        // que capturarlas por adelantado las perdía).
+        const original = {
+          writeHead: res.writeHead.bind(res),
+          write: res.write.bind(res),
+          end: res.end.bind(res),
+        };
+        const chunks = [];
+        res.write = (chunk, encoding, cb) => {
+          if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding || 'utf8'));
+          if (typeof cb === 'function') cb();
+          return true;
+        };
+        res.end = (chunk, encoding, cb) => {
+          if (chunk) chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk, encoding || 'utf8'));
+          // Se restaura el objeto real antes de escribir: la respuesta final
+          // la emite Node con su `writeHead`/`end` originales.
+          const { writeHead, write, end } = original;
+          res.write = write;
+          res.end = end;
+          const body = Buffer.concat(chunks);
+          if (body.length === 0) return end();
+          const gz = gzipSync(body);
+          // Si Node ya emitió las cabeceras (el handler llamó a `writeHead`),
+          // sólo queda el cuerpo: se descarta el original y se envía el gzip.
+          if (res.headersSent) return end(gz, undefined, typeof cb === 'function' ? cb : undefined);
+          // Si no, se responde aquí mismo con TODAS las cabeceras (`sirv` fija
+          // `Content-Type` y `Content-Length` en su handler, que no llegará a
+          // ejecutarse). Sin esto Node descarta el `Content-Length` y responde
+          // chunked sin tipo: el navegador recibe el HTML como archivo
+          // descargable en lugar de abrir la app.
+          res.writeHead = writeHead;
+          return writeHead(
+            res.statusCode || 200,
+            Object.assign({}, res.getHeaders(), {
+              'Content-Type': mimeFor(pathname),
+              'Content-Encoding': 'gzip',
+              Vary: 'Accept-Encoding',
+              'Content-Length': String(gz.length),
+            }),
+          ).end(gz, undefined, typeof cb === 'function' ? cb : undefined);
+        };
+        next();
+      });
     },
   };
 }
@@ -218,6 +301,7 @@ export default defineConfig({
   plugins: [
     tunnelHeadersPlugin(),
     tunnelEnvPlugin(),
+    previewCompressionPlugin(),
     react(),
     VitePWA({
       registerType: 'autoUpdate',
@@ -248,18 +332,81 @@ export default defineConfig({
         ],
       },
       workbox: {
-        // El shell de la app (JS/CSS/HTML/íconos) se precachea para abrirla offline.
-        globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],
+        // App Shell: todo el JS/CSS/HTML del build se precachea al instalar el
+        // Service Worker, así la app abre al instante (y sin red).
+        globPatterns: ['**/*.{js,css,html,svg,png,woff2,webmanifest}'],
         navigateFallback: '/index.html',
         // Las llamadas a la API nunca se sirven desde caché: la verificación
         // decide en línea y, sin red, se usa la cola IndexedDB (RNF-09).
         navigateFallbackDenylist: [/^\/api\//, /^\/admin\//, /^\/media\//, /^\/ws\//],
         cleanupOutdatedCaches: true,
         maximumFileSizeToCacheInBytes: 4 * 1024 * 1024,
+        // 1) La API se excluye explícitamente: aunque alguna petición no pase
+        //    por la denylist, nunca se cachea (los datos de acceso cambian).
+        // 2) Fuentes y imágenes: CacheFirst con caché agresiva y expiración.
+        runtimeCaching: [
+          {
+            urlPattern: ({ url }) =>
+              url.origin === self.location.origin && /^\/(api|admin|media|oauth)\//.test(url.pathname),
+            handler: 'NetworkOnly',
+            method: 'GET',
+          },
+          {
+            // Google Fonts: hoja de estilos (cachea el CSS y sus `.woff2`).
+            urlPattern: /^https:\/\/fonts\.googleapis\.com\/.*/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'sigacu-google-fonts-css',
+              expiration: { maxEntries: 10, maxAgeSeconds: 60 * 60 * 24 * 365 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+          {
+            // Archivos de fuente reales (servidos por gstatic).
+            urlPattern: /^https:\/\/fonts\.gstatic\.com\/.*/i,
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'sigacu-google-fonts-webfonts',
+              expiration: { maxEntries: 30, maxAgeSeconds: 60 * 60 * 24 * 365 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+          {
+            // Fuentes locales del build (`/assets/*.woff2`).
+            urlPattern: ({ request, url }) =>
+              url.origin === self.location.origin && /\.(woff2?|ttf|otf)$/.test(url.pathname),
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'sigacu-fonts',
+              expiration: { maxEntries: 20, maxAgeSeconds: 60 * 60 * 24 * 365 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+          {
+            // Imágenes estáticas de la app.
+            urlPattern: ({ request, url }) =>
+              url.origin === self.location.origin &&
+              (request.destination === 'image' || /\.(png|jpe?g|webp|svg|ico)$/.test(url.pathname)),
+            handler: 'CacheFirst',
+            options: {
+              cacheName: 'sigacu-images',
+              expiration: { maxEntries: 60, maxAgeSeconds: 60 * 60 * 24 * 30 },
+              cacheableResponse: { statuses: [0, 200] },
+            },
+          },
+        ],
       },
       devOptions: { enabled: false },
     }),
     buildStaticPlugin(),
+    compression({
+      // Los `.br` sólo los usa Nginx/servidor real; son ~15 % menores que gzip.
+      algorithms: ['gzip', 'brotliCompress'],
+      include: [/\.(js|mjs|css|html|json|svg|txt|webmanifest)$/],
+      // El Service Worker NO se comprime: Workbox lo pide byte a byte.
+      exclude: [/^.*(sw|workbox).*\.js$/],
+      threshold: 1024,
+    }),
   ],
   resolve: {
     alias: {
@@ -309,9 +456,13 @@ export default defineConfig({
     chunkSizeWarningLimit: 900,
     rollupOptions: {
       output: {
+        // Sólo `react` se separa para cachearlo entre versiones. `recharts` NO
+        // se declara aquí: al estar sólo en `DashboardPage` (lazy), Rollup lo
+        // deja dentro de ese chunk y **no** se descarga en el login. Declararlo
+        // como `charts` lo convertía en dependencia del entry y lo precargaba
+        // (`<link rel=modulepreload>`) en la primera visita: ~384 KB de más.
         manualChunks: {
           react: ['react', 'react-dom', 'react-router-dom'],
-          charts: ['recharts'],
         },
       },
     },
