@@ -10,6 +10,10 @@ import {
   CartesianGrid,
   BarChart,
   Bar,
+  PieChart,
+  Pie,
+  Cell,
+  Legend,
 } from 'recharts';
 import { reportService } from '@/services';
 import { parseApiError } from '@/services/api';
@@ -28,6 +32,17 @@ const CAMPUS_LABELS = {
   CULTURA_FISICA: 'Cultura Física',
   SIN_SEDE: 'Sin sede',
 };
+
+const USER_TYPE_LABELS = {
+  ESTUDIANTE: 'Estudiantes',
+  PROFESOR: 'Profesores',
+  TRABAJADOR: 'Trabajadores',
+  CUADRO: 'Cuadros',
+  VISITANTE: 'Visitantes',
+  DESCONOCIDO: 'Otros',
+};
+
+const PIE_COLORS = ['#1b4074', '#d9a441', '#2e7d32', '#c62828', '#5e35b1', '#00838f'];
 
 /** Panel de inicio: KPIs, flujo horario y actividad reciente. */
 export default function DashboardPage() {
@@ -63,6 +78,12 @@ export default function DashboardPage() {
   const byCampus = Object.entries(summary?.by_campus || {}).map(([campus, total]) => ({
     campus: CAMPUS_LABELS[campus] || campus,
     total,
+  }));
+
+  const byUserType = Object.entries(summary?.by_user_type || {}).map(([type, total], index) => ({
+    name: USER_TYPE_LABELS[type] || type,
+    value: total,
+    color: PIE_COLORS[index % PIE_COLORS.length],
   }));
 
   return (
@@ -193,67 +214,84 @@ export default function DashboardPage() {
             </div>
           </div>
 
-          <div className="mt-6 card">
-            <div className="card-header">
-              <div>
-                <h2 className="card-title">Actividad reciente</h2>
-                <p className="text-xs text-brand-400">Últimos movimientos de control de acceso</p>
+          <div className="mt-6 grid gap-4 lg:grid-cols-3">
+            <div className="card">
+              <div className="card-header">
+                <h2 className="card-title">Accesos por tipo de usuario</h2>
               </div>
-              <Link to="/acceso/bitacora" className="btn-secondary btn-sm">
-                Ver bitácora <Icon name="arrowRight" size={14} />
-              </Link>
-            </div>
-            <div className="table-wrapper border-0">
-              <table className="data-table">
-                <thead>
-                  <tr>
-                    <th>Fecha y hora</th>
-                    <th>Persona</th>
-                    <th>CI</th>
-                    <th>Sede</th>
-                    <th>Movimiento</th>
-                    <th>Resultado</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {loading &&
-                    Array.from({ length: 5 }).map((_, index) => (
-                      <tr key={index} className="animate-pulse">
-                        {Array.from({ length: 6 }).map((__, cell) => (
-                          <td key={cell} className="border-b border-brand-50 px-4 py-3">
-                            <div className="h-3 rounded bg-brand-100" />
-                          </td>
+              <div className="h-64 px-2 py-4">
+                {byUserType.length ? (
+                  <ResponsiveContainer width="100%" height="100%">
+                    <PieChart>
+                      <Pie
+                        data={byUserType}
+                        dataKey="value"
+                        nameKey="name"
+                        innerRadius={45}
+                        outerRadius={75}
+                        paddingAngle={2}
+                      >
+                        {byUserType.map((entry) => (
+                          <Cell key={entry.name} fill={entry.color} />
                         ))}
-                      </tr>
-                    ))}
-                  {!loading && recent.length === 0 && (
+                      </Pie>
+                      <Legend iconType="circle" wrapperStyle={{ fontSize: 12 }} />
+                      <Tooltip contentStyle={{ borderRadius: 10, fontSize: 12 }} />
+                    </PieChart>
+                  </ResponsiveContainer>
+                ) : (
+                  <EmptyState title="Sin datos" />
+                )}
+              </div>
+            </div>
+            <div className="card lg:col-span-2">
+              <div className="card-header">
+                <div>
+                  <h2 className="card-title">Actividad reciente</h2>
+                  <p className="text-xs text-brand-400">Últimos movimientos de control de acceso</p>
+                </div>
+                <Link to="/acceso/bitacora" className="btn-secondary btn-sm">
+                  Ver bitácora <Icon name="arrowRight" size={14} />
+                </Link>
+              </div>
+              <div className="max-h-64 overflow-auto table-wrapper border-0">
+                <table className="data-table">
+                  <thead>
                     <tr>
-                      <td colSpan={6}>
-                        <EmptyState
-                          title="No hay accesos registrados"
-                          description="Cuando se registren movimientos en los puntos de control aparecerán aquí."
-                        />
-                      </td>
+                      <th>Fecha y hora</th>
+                      <th>Persona</th>
+                      <th>Sede</th>
+                      <th>Resultado</th>
                     </tr>
-                  )}
-                  {!loading &&
-                    recent.map((item) => (
-                      <tr key={item.uuid}>
-                        <td className="whitespace-nowrap text-brand-500">{formatDateTime(item.occurred_at)}</td>
-                        <td className="font-medium">{item.full_name || '—'}</td>
-                        <td className="mono">{item.identity_card || '—'}</td>
-                        <td>{CAMPUS_LABELS[item.campus] || item.campus || '—'}</td>
-                        <td>{item.movement === 'ENTRADA' ? 'Entrada' : 'Salida'}</td>
-                        <td>
-                          <StatusBadge
-                            status={item.result}
-                            label={item.denial_reason ? `${item.result} · ${item.denial_reason}` : undefined}
+                  </thead>
+                  <tbody>
+                    {!loading && recent.length === 0 && (
+                      <tr>
+                        <td colSpan={4}>
+                          <EmptyState
+                            title="No hay accesos registrados"
+                            description="Cuando se registren movimientos en los puntos de control aparecerán aquí."
                           />
                         </td>
                       </tr>
-                    ))}
-                </tbody>
-              </table>
+                    )}
+                    {!loading &&
+                      recent.map((item) => (
+                        <tr key={item.uuid}>
+                          <td className="whitespace-nowrap text-brand-500">{formatDateTime(item.occurred_at)}</td>
+                          <td className="font-medium">{item.full_name || '—'}</td>
+                          <td>{CAMPUS_LABELS[item.campus] || item.campus || '—'}</td>
+                          <td>
+                            <StatusBadge
+                              status={item.result}
+                              label={item.denial_reason ? `${item.result} · ${item.denial_reason}` : undefined}
+                            />
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
             </div>
           </div>
         </>
