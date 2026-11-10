@@ -6,8 +6,11 @@ import { EmptyState, ErrorState } from '@/components/ui/DataStates';
 import StatusBadge from '@/components/ui/StatusBadge';
 import Icon from '@/components/ui/Icon';
 import Modal from '@/components/ui/Modal';
+import Pagination from '@/components/ui/Pagination';
 import { useToast } from '@/components/ui/Toast';
 import { formatDateTime } from '@/utils';
+
+const PAGE_SIZE = 10;
 
 const TYPES = [
   { value: 'ACCESO_DENEGADO', label: 'Acceso denegado' },
@@ -17,31 +20,32 @@ const TYPES = [
   { value: 'OTRO', label: 'Otro' },
 ];
 
-/** Registro y seguimiento de incidencias (RF-07). */
+const INITIAL_FORM = {
+  title: '',
+  description: '',
+  incident_type: 'ACCESO_DENEGADO',
+  severity: 'MEDIA',
+  campus: 'CENTRAL',
+};
+
+/** RF-07 · Registro y seguimiento de incidencias. */
 export default function IncidentsPage() {
   const toast = useToast();
   const [items, setItems] = useState([]);
-  const [meta, setMeta] = useState({ count: 0 });
+  const [meta, setMeta] = useState({ count: 0, next: null });
   const [filters, setFilters] = useState({ status: '', severity: '', search: '', page: 1 });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [modalOpen, setModalOpen] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [campusList, setCampusList] = useState([]);
-  const [form, setForm] = useState({
-    title: '',
-    description: '',
-    incident_type: 'ACCESO_DENEGADO',
-    severity: 'MEDIA',
-    campus: 'CENTRAL',
-    person_name: '',
-    person_identity_card: '',
-  });
+  const [form, setForm] = useState(INITIAL_FORM);
 
   async function load() {
     setLoading(true);
     setError('');
     try {
-      const data = await incidentService.list({ ...filters, page_size: 20 });
+      const data = await incidentService.list({ ...filters, page_size: PAGE_SIZE });
       setItems(data.results || data);
       setMeta({ count: data.count ?? 0, next: data.next });
     } catch (err) {
@@ -54,22 +58,34 @@ export default function IncidentsPage() {
   useEffect(() => {
     const timeout = setTimeout(load, 250);
     return () => clearTimeout(timeout);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [filters]);
 
   useEffect(() => {
-    coreService.campuses().then((data) => setCampusList(data.results || data)).catch(() => { });
+    coreService
+      .campuses()
+      .then((data) => setCampusList(data.results || data))
+      .catch(() => { });
   }, []);
 
   async function handleCreate(event) {
     event.preventDefault();
+    setSubmitting(true);
     try {
       await incidentService.create(form);
       toast.success('Incidencia registrada.');
       setModalOpen(false);
-      setForm({ ...form, title: '', description: '', person_name: '', person_identity_card: '' });
-      await load();
+      setForm(INITIAL_FORM);
+      // Volver a la primera página para que la nueva incidencia sea visible.
+      if (filters.page !== 1) {
+        setFilters({ ...filters, page: 1 });
+      } else {
+        await load();
+      }
     } catch (err) {
       toast.error(parseApiError(err));
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -85,12 +101,12 @@ export default function IncidentsPage() {
     }
   }
 
-  const totalPages = Math.max(1, Math.ceil((meta.count || 0) / 20));
+  const totalPages = Math.max(1, Math.ceil((meta.count || 0) / PAGE_SIZE));
 
   return (
     <PageContainer>
       <PageHeader
-        title="Incidencias"
+        title="Incidencias (RF-07)"
         description="Registro y seguimiento de incidentes ocurridos en los puntos de acceso."
         actions={
           <button type="button" className="btn-primary" onClick={() => setModalOpen(true)}>
@@ -146,88 +162,86 @@ export default function IncidentsPage() {
           <ErrorState message={error} onRetry={load} />
         </div>
       ) : (
-        <>
-          <div className="space-y-3">
-            {loading && <div className="card h-24 animate-pulse bg-brand-50" />}
-            {!loading && items.length === 0 && (
-              <div className="card">
-                <EmptyState title="Sin incidencias" description="No se encontraron incidencias con esos filtros." />
-              </div>
-            )}
-            {items.map((item) => (
-              <div key={item.uuid} className="card p-5">
-                <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-                  <div className="flex items-start gap-3">
-                    <span
-                      className={`mt-0.5 flex h-9 w-9 items-center justify-center rounded-lg ${item.severity === 'CRITICA' || item.severity === 'ALTA'
-                          ? 'bg-red-50 text-red-600'
-                          : 'bg-amber-50 text-amber-600'
-                        }`}
-                    >
-                      <Icon name="alert" size={18} />
-                    </span>
-                    <div>
-                      <div className="flex flex-wrap items-center gap-2">
-                        <p className="font-medium text-brand-900">{item.title}</p>
+        <div className="card">
+          <div className="card-header">
+            <h2 className="card-title">Incidencias registradas</h2>
+            <span className="badge-info">{meta.count} registros</span>
+          </div>
+          <div className="table-wrapper border-0">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th>Título</th>
+                  <th>Fecha</th>
+                  <th>Sede</th>
+                  <th>Estado</th>
+                  <th>Acciones</th>
+                </tr>
+              </thead>
+              <tbody>
+                {loading && (
+                  <tr>
+                    <td colSpan={5} className="py-8 text-center text-brand-400">Cargando…</td>
+                  </tr>
+                )}
+                {!loading && items.length === 0 && (
+                  <tr>
+                    <td colSpan={5}>
+                      <EmptyState
+                        title="Sin incidencias"
+                        description="No se encontraron incidencias con esos filtros."
+                      />
+                    </td>
+                  </tr>
+                )}
+                {items.map((item) => (
+                  <tr key={item.uuid}>
+                    <td>
+                      <p className="font-medium text-brand-900">{item.title}</p>
+                      <p className="text-xs text-brand-400">
+                        <span className="mono">{item.code}</span> · {item.incident_type_display || item.incident_type} ·{' '}
                         <StatusBadge status={item.severity} label={item.severity_display} />
-                        <StatusBadge status={item.status} label={item.status_display} />
-                      </div>
-                      <p className="mt-1 text-sm text-brand-500">{item.description}</p>
-                      <p className="mt-1 text-xs text-brand-400">
-                        <span className="mono">{item.code}</span> · {item.campus} ·{' '}
-                        {formatDateTime(item.occurred_at)} · Reporta: {item.reported_by_name}
-                        {item.person_name && ` · Involucrado: ${item.person_name}`}
                       </p>
-                    </div>
-                  </div>
-                  <div className="flex shrink-0 gap-1">
-                    {item.status !== 'SEGUIMIENTO' && item.status !== 'CERRADA' && (
-                      <button
-                        type="button"
-                        className="btn-secondary btn-sm"
-                        onClick={() => changeStatus(item, 'SEGUIMIENTO')}
-                      >
-                        En seguimiento
-                      </button>
-                    )}
-                    {item.status !== 'CERRADA' && (
-                      <button
-                        type="button"
-                        className="btn-sm bg-emerald-600 text-white hover:bg-emerald-700"
-                        onClick={() => changeStatus(item, 'CERRADA')}
-                      >
-                        Cerrar
-                      </button>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ))}
+                    </td>
+                    <td className="whitespace-nowrap">{formatDateTime(item.occurred_at)}</td>
+                    <td>{item.campus}</td>
+                    <td>
+                      <StatusBadge status={item.status} label={item.status_display} />
+                    </td>
+                    <td>
+                      <div className="flex gap-1">
+                        {item.status !== 'SEGUIMIENTO' && item.status !== 'CERRADA' && (
+                          <button
+                            type="button"
+                            className="btn-secondary btn-sm"
+                            onClick={() => changeStatus(item, 'SEGUIMIENTO')}
+                          >
+                            Seguimiento
+                          </button>
+                        )}
+                        {item.status !== 'CERRADA' && (
+                          <button
+                            type="button"
+                            className="btn-sm bg-emerald-600 text-white hover:bg-emerald-700"
+                            onClick={() => changeStatus(item, 'CERRADA')}
+                          >
+                            Cerrar
+                          </button>
+                        )}
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           </div>
-
-          <div className="mt-3 flex items-center justify-between text-sm text-brand-500">
-            <span>{meta.count} incidencias</span>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                className="btn-secondary btn-sm"
-                disabled={filters.page <= 1}
-                onClick={() => setFilters({ ...filters, page: filters.page - 1 })}
-              >
-                Anterior
-              </button>
-              <span>{filters.page} / {totalPages}</span>
-              <button
-                type="button"
-                className="btn-secondary btn-sm"
-                disabled={!meta.next}
-                onClick={() => setFilters({ ...filters, page: filters.page + 1 })}
-              >
-                Siguiente
-              </button>
-            </div>
-          </div>
-        </>
+          <Pagination
+            page={filters.page}
+            pageCount={totalPages}
+            total={meta.count}
+            onPageChange={(page) => setFilters({ ...filters, page })}
+          />
+        </div>
       )}
 
       <Modal
@@ -240,8 +254,8 @@ export default function IncidentsPage() {
             <button type="button" className="btn-secondary" onClick={() => setModalOpen(false)}>
               Cancelar
             </button>
-            <button type="submit" form="incident-form" className="btn-primary">
-              Registrar incidencia
+            <button type="submit" form="incident-form" className="btn-primary" disabled={submitting}>
+              {submitting ? 'Guardando…' : 'Registrar incidencia'}
             </button>
           </>
         }
@@ -259,7 +273,7 @@ export default function IncidentsPage() {
           </div>
           <div className="grid grid-cols-2 gap-3">
             <div>
-              <label className="label" htmlFor="type">Tipo</label>
+              <label className="label" htmlFor="type">Tipo de incidencia</label>
               <select
                 id="type"
                 className="input"
@@ -285,7 +299,7 @@ export default function IncidentsPage() {
                 <option value="CRITICA">Crítica</option>
               </select>
             </div>
-            <div>
+            <div className="col-span-2">
               <label className="label" htmlFor="campus">Sede</label>
               <select
                 id="campus"
@@ -298,25 +312,6 @@ export default function IncidentsPage() {
                 ))}
               </select>
             </div>
-            <div>
-              <label className="label" htmlFor="person-ci">CI de la persona</label>
-              <input
-                id="person-ci"
-                className="input mono"
-                maxLength={11}
-                value={form.person_identity_card}
-                onChange={(event) => setForm({ ...form, person_identity_card: event.target.value })}
-              />
-            </div>
-          </div>
-          <div>
-            <label className="label" htmlFor="person">Persona involucrada</label>
-            <input
-              id="person"
-              className="input"
-              value={form.person_name}
-              onChange={(event) => setForm({ ...form, person_name: event.target.value })}
-            />
           </div>
           <div>
             <label className="label" htmlFor="description">Descripción</label>

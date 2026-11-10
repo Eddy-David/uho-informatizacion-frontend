@@ -6,42 +6,37 @@ import { EmptyState } from '@/components/ui/DataStates';
 import Icon from '@/components/ui/Icon';
 import Modal from '@/components/ui/Modal';
 import StatusBadge from '@/components/ui/StatusBadge';
+import Pagination from '@/components/ui/Pagination';
 import { useToast } from '@/components/ui/Toast';
 import { formatDate, formatDateTime } from '@/utils';
 
-/** Registro de entrada/salida y catálogo de vehículos autorizados. */
+const PAGE_SIZE = 10;
+
+/** RF-06 · Control vehicular: verificación de placa y registro de entradas/salidas. */
 export default function VehiclesPage() {
   const toast = useToast();
   const [plate, setPlate] = useState('');
+  const [checking, setChecking] = useState(false);
   const [check, setCheck] = useState(null);
-  const [movement, setMovement] = useState('ENTRADA');
+
+  const [exceptionOpen, setExceptionOpen] = useState(false);
+  const [exceptionReason, setExceptionReason] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
   const [campuses, setCampuses] = useState([]);
   const [campus, setCampus] = useState('CENTRAL');
-  const [driver, setDriver] = useState('');
-  const [reason, setReason] = useState('');
-  const [movements, setMovements] = useState([]);
-  const [authorized, setAuthorized] = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [submitting, setSubmitting] = useState(false);
-  const [modalOpen, setModalOpen] = useState(false);
-  const [newVehicle, setNewVehicle] = useState({
-    plate: '',
-    vehicle_type: 'Automóvil',
-    owner_name: '',
-    authorization_reason: '',
-  });
 
-  async function loadData() {
+  const [movements, setMovements] = useState([]);
+  const [movementMeta, setMovementMeta] = useState({ count: 0 });
+  const [movementPage, setMovementPage] = useState(1);
+  const [loading, setLoading] = useState(true);
+
+  async function loadMovements(page = movementPage) {
     setLoading(true);
     try {
-      const [today, catalog, campusList] = await Promise.all([
-        vehicleService.today({ campus, page_size: 50 }),
-        vehicleService.authorized({ page_size: 50 }),
-        coreService.campuses(),
-      ]);
-      setMovements(today.results || today);
-      setAuthorized(catalog.results || catalog);
-      setCampuses(campusList.results || campusList);
+      const data = await vehicleService.today({ campus, page_size: PAGE_SIZE, page });
+      setMovements(data.results || data);
+      setMovementMeta({ count: data.count ?? 0, next: data.next });
     } catch (err) {
       toast.error(parseApiError(err));
     } finally {
@@ -50,36 +45,46 @@ export default function VehiclesPage() {
   }
 
   useEffect(() => {
-    loadData();
-  }, [campus]);
+    loadMovements(movementPage);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [campus, movementPage]);
 
-  async function handleCheck() {
+  useEffect(() => {
+    coreService
+      .campuses()
+      .then((data) => setCampuses(data.results || data))
+      .catch(() => { });
+  }, []);
+
+  async function handleSearch(event) {
+    event?.preventDefault?.();
     if (!plate.trim()) return;
+    setChecking(true);
+    setCheck(null);
     try {
       const data = await vehicleService.check(plate.trim());
       setCheck(data);
     } catch (err) {
       toast.error(parseApiError(err));
+    } finally {
+      setChecking(false);
     }
   }
 
-  async function handleRegister(event) {
-    event.preventDefault();
+  /** Registro de ENTRADA/SALIDA de un vehículo autorizado. */
+  async function handleRegisterAuthorized(movementType) {
     setSubmitting(true);
     try {
       await vehicleService.register({
         plate: plate.trim(),
-        movement,
+        movement: movementType,
         campus,
-        driver_name: driver,
-        reason,
       });
-      toast.success('Movimiento vehicular registrado.');
+      toast.success(`Entrada/Salida registrada para ${plate.trim()}.`);
       setPlate('');
       setCheck(null);
-      setDriver('');
-      setReason('');
-      await loadData();
+      setMovementPage(1);
+      await loadMovements(1);
     } catch (err) {
       toast.error(parseApiError(err));
     } finally {
@@ -87,280 +92,250 @@ export default function VehiclesPage() {
     }
   }
 
-  async function handleCreateVehicle(event) {
+  /** Registro de ENTRADA por excepción con motivo obligatorio. */
+  async function handleRegisterException(event) {
     event.preventDefault();
+    if (!exceptionReason.trim()) return;
+    setSubmitting(true);
     try {
-      await vehicleService.createAuthorized({ ...newVehicle, campus });
-      toast.success('Vehículo autorizado registrado.');
-      setModalOpen(false);
-      setNewVehicle({ plate: '', vehicle_type: 'Automóvil', owner_name: '', authorization_reason: '' });
-      await loadData();
+      await vehicleService.register({
+        plate: plate.trim(),
+        movement: 'ENTRADA',
+        campus,
+        reason: exceptionReason.trim(),
+      });
+      toast.success('Entrada por excepción registrada.');
+      setExceptionOpen(false);
+      setExceptionReason('');
+      setPlate('');
+      setCheck(null);
+      setMovementPage(1);
+      await loadMovements(1);
     } catch (err) {
       toast.error(parseApiError(err));
+    } finally {
+      setSubmitting(false);
     }
   }
+
+  const vehicle = check?.vehicle;
+  const movementTotalPages = Math.max(1, Math.ceil((movementMeta.count || 0) / PAGE_SIZE));
 
   return (
     <PageContainer>
       <PageHeader
-        title="Vehículos · Control vehicular"
-        description="Verifique la placa de un vehículo, registre su movimiento y administre el catálogo de autorizados."
-        actions={
-          <button type="button" className="btn-primary" onClick={() => setModalOpen(true)}>
-            <Icon name="plus" size={16} /> Nuevo vehículo autorizado
-          </button>
-        }
+        title="Vehículos · Control vehicular (RF-06)"
+        description="Ingrese la placa para verificar si el vehículo está autorizado y registrar su entrada o salida."
       />
 
-      <div className="grid gap-5 xl:grid-cols-2">
-        <form onSubmit={handleRegister} className="card p-5">
-          <h2 className="card-title">Registrar movimiento</h2>
-          <div className="mt-4 space-y-3">
-            <div>
-              <label className="label" htmlFor="plate">Placa del vehículo</label>
-              <div className="flex gap-2">
-                <input
-                  id="plate"
-                  className="input mono uppercase"
-                  placeholder="Ej. H123456"
-                  value={plate}
-                  onChange={(event) => setPlate(event.target.value.toUpperCase())}
-                  onBlur={handleCheck}
-                />
-                <button type="button" className="btn-secondary" onClick={handleCheck}>
-                  <Icon name="search" size={16} />
+      {/* Buscador de placa */}
+      <form onSubmit={handleSearch} className="card p-5">
+        <label className="label" htmlFor="plate">Placa del vehículo</label>
+        <div className="mt-2 flex flex-col gap-3 sm:flex-row">
+          <input
+            id="plate"
+            className="input mono uppercase text-lg tracking-widest"
+            style={{ fontSize: '1.35rem', padding: '0.75rem 1rem' }}
+            placeholder="Ej. H123456"
+            value={plate}
+            onChange={(event) => {
+              setPlate(event.target.value.toUpperCase());
+              setCheck(null);
+            }}
+          />
+          <button type="submit" className="btn-primary sm:w-48" disabled={checking || !plate.trim()}>
+            <Icon name="search" size={18} /> {checking ? 'Buscando…' : 'Buscar'}
+          </button>
+        </div>
+      </form>
+
+      {/* Resultado de la verificación */}
+      {check && (
+        <div className="mt-5">
+          {check.authorized ? (
+            <div className="card border-emerald-200 bg-emerald-50 p-5">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <p className="flex items-center gap-2 font-semibold text-emerald-800">
+                    <Icon name="check" size={18} /> Vehículo autorizado
+                  </p>
+                  <dl className="mt-3 grid grid-cols-2 gap-x-6 gap-y-1 text-sm text-emerald-900 sm:grid-cols-3">
+                    <div>
+                      <dt className="text-xs text-emerald-600">Placa</dt>
+                      <dd className="mono font-medium">{vehicle?.plate || plate}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-emerald-600">Tipo</dt>
+                      <dd>{vehicle?.vehicle_type || '—'}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-emerald-600">Área / Propietario</dt>
+                      <dd>{vehicle?.owner_name || '—'}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-emerald-600">Sede</dt>
+                      <dd>{vehicle?.campus || '—'}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-emerald-600">Vigencia</dt>
+                      <dd>{vehicle?.valid_until ? formatDate(vehicle.valid_until) : 'Indefinida'}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-xs text-emerald-600">Motivo</dt>
+                      <dd>{vehicle?.authorization_reason || '—'}</dd>
+                    </div>
+                  </dl>
+                </div>
+                <div className="flex shrink-0 flex-col gap-2 sm:w-56">
+                  <button
+                    type="button"
+                    className="btn-primary"
+                    disabled={submitting}
+                    onClick={() => handleRegisterAuthorized('ENTRADA')}
+                  >
+                    <Icon name="car" size={16} /> Registrar Entrada
+                  </button>
+                  <button
+                    type="button"
+                    className="btn-secondary"
+                    disabled={submitting}
+                    onClick={() => handleRegisterAuthorized('SALIDA')}
+                  >
+                    <Icon name="car" size={16} /> Registrar Salida
+                  </button>
+                </div>
+              </div>
+            </div>
+          ) : (
+            <div className="card border-red-300 bg-red-50 p-5">
+              <div className="flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between">
+                <div>
+                  <p className="flex items-center gap-2 font-semibold text-red-800">
+                    <Icon name="alert" size={18} /> Vehículo NO autorizado
+                  </p>
+                  <p className="mt-1 text-sm text-red-700">
+                    {check.reason
+                      ? `La placa ${check.vehicle?.plate || plate} existe en el catálogo pero: ${check.reason.toLowerCase()}.`
+                      : `La placa ${check.plate || plate} no se encuentra en el catálogo de vehículos autorizados.`}
+                  </p>
+                  <p className="mt-1 text-xs text-red-600">
+                    Solo se permite registrar una ENTRADA POR EXCEPCIÓN indicando el motivo.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  className="btn-sm shrink-0 bg-red-600 text-white hover:bg-red-700 sm:w-64"
+                  onClick={() => setExceptionOpen(true)}
+                >
+                  Registrar Entrada por Excepción
                 </button>
               </div>
             </div>
-
-            {check && (
-              <div
-                className={`rounded-lg border px-3 py-2 text-sm ${check.authorized
-                    ? 'border-emerald-200 bg-emerald-50 text-emerald-800'
-                    : 'border-amber-200 bg-amber-50 text-amber-800'
-                  }`}
-              >
-                {check.authorized ? (
-                  <>
-                    <p className="font-medium">Vehículo autorizado</p>
-                    <p className="text-xs">
-                      {check.vehicle?.owner_name} · {check.vehicle?.authorization_reason}
-                    </p>
-                  </>
-                ) : (
-                  <>
-                    <p className="font-medium">Vehículo no autorizado o vencido</p>
-                    <p className="text-xs">Se registrará como entrada por excepción.</p>
-                  </>
-                )}
-              </div>
-            )}
-
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="label" htmlFor="movement">Movimiento</label>
-                <div className="flex rounded-lg border border-brand-200 p-1">
-                  {['ENTRADA', 'SALIDA'].map((value) => (
-                    <button
-                      key={value}
-                      type="button"
-                      className={`flex-1 rounded-md px-2 py-1.5 text-sm ${movement === value ? 'bg-brand-800 text-white' : 'text-brand-600'
-                        }`}
-                      onClick={() => setMovement(value)}
-                    >
-                      {value === 'ENTRADA' ? 'Entrada' : 'Salida'}
-                    </button>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <label className="label" htmlFor="campus">Sede</label>
-                <select
-                  id="campus"
-                  className="input"
-                  value={campus}
-                  onChange={(event) => setCampus(event.target.value)}
-                >
-                  {campuses.map((item) => (
-                    <option key={item.code} value={item.code}>{item.name}</option>
-                  ))}
-                </select>
-              </div>
-            </div>
-
-            <div>
-              <label className="label" htmlFor="driver">CI del conductor (opcional)</label>
-              <input
-                id="driver"
-                className="input mono"
-                value={driver}
-                onChange={(event) => setDriver(event.target.value)}
-              />
-            </div>
-            <div>
-              <label className="label" htmlFor="reason">Motivo (si no está en el catálogo)</label>
-              <input
-                id="reason"
-                className="input"
-                value={reason}
-                onChange={(event) => setReason(event.target.value)}
-                placeholder="Ej. Entrega de materiales para Obra 1"
-              />
-            </div>
-
-            <button type="submit" className="btn-primary w-full" disabled={submitting || !plate.trim()}>
-              <Icon name="car" size={16} /> {submitting ? 'Registrando…' : 'Registrar movimiento'}
-            </button>
-          </div>
-        </form>
-
-        <div className="card">
-          <div className="card-header">
-            <h2 className="card-title">Movimientos del día</h2>
-            <span className="badge-info">{movements.length} registros</span>
-          </div>
-          <div className="table-wrapper border-0">
-            <table className="data-table">
-              <thead>
-                <tr>
-                  <th>Hora</th>
-                  <th>Placa</th>
-                  <th>Tipo</th>
-                  <th>Movimiento</th>
-                  <th>Estado</th>
-                </tr>
-              </thead>
-              <tbody>
-                {loading && (
-                  <tr>
-                    <td colSpan={5} className="py-8 text-center text-brand-400">Cargando…</td>
-                  </tr>
-                )}
-                {!loading && movements.length === 0 && (
-                  <tr>
-                    <td colSpan={5}>
-                      <EmptyState title="Sin movimientos hoy" />
-                    </td>
-                  </tr>
-                )}
-                {movements.map((item) => (
-                  <tr key={item.uuid}>
-                    <td className="mono">{formatDateTime(item.occurred_at).split(', ')[1] || '—'}</td>
-                    <td className="mono">{item.plate}</td>
-                    <td>{item.vehicle_type || '—'}</td>
-                    <td>
-                      <StatusBadge
-                        status={item.movement === 'ENTRADA' ? 'PERMITIDO' : 'CANCELADO'}
-                        label={item.movement === 'ENTRADA' ? 'Entrada' : 'Salida'}
-                      />
-                    </td>
-                    <td>
-                      <span className={item.is_exception ? 'badge-warning' : 'badge-info'}>
-                        {item.status_after_display}
-                      </span>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
+          )}
         </div>
-      </div>
+      )}
 
+      {/* Movimientos del día */}
       <div className="card mt-5">
         <div className="card-header">
-          <h2 className="card-title">Vehículos autorizados</h2>
+          <h2 className="card-title">Movimientos del día</h2>
+          <div className="flex items-center gap-2">
+            <select className="input w-auto py-1 text-sm" value={campus} onChange={(event) => {
+              setCampus(event.target.value);
+              setMovementPage(1);
+            }}>
+              {campuses.map((item) => (
+                <option key={item.code} value={item.code}>{item.name}</option>
+              ))}
+            </select>
+            <span className="badge-info">{movementMeta.count} registros</span>
+          </div>
         </div>
         <div className="table-wrapper border-0">
           <table className="data-table">
             <thead>
               <tr>
+                <th>Hora</th>
                 <th>Placa</th>
                 <th>Tipo</th>
-                <th>Propietario / área</th>
-                <th>Motivo</th>
-                <th>Vigencia</th>
+                <th>Movimiento</th>
                 <th>Estado</th>
               </tr>
             </thead>
             <tbody>
-              {authorized.map((vehicle) => (
-                <tr key={vehicle.uuid}>
-                  <td className="mono">{vehicle.plate}</td>
-                  <td>{vehicle.vehicle_type}</td>
-                  <td>{vehicle.owner_name}</td>
-                  <td>{vehicle.authorization_reason}</td>
-                  <td>{vehicle.valid_until ? formatDate(vehicle.valid_until) : 'Indefinida'}</td>
+              {loading && (
+                <tr>
+                  <td colSpan={5} className="py-8 text-center text-brand-400">Cargando…</td>
+                </tr>
+              )}
+              {!loading && movements.length === 0 && (
+                <tr>
+                  <td colSpan={5}>
+                    <EmptyState title="Sin movimientos hoy" />
+                  </td>
+                </tr>
+              )}
+              {movements.map((item) => (
+                <tr key={item.uuid}>
+                  <td className="mono">{formatDateTime(item.occurred_at).split(', ')[1] || '—'}</td>
+                  <td className="mono">{item.plate}</td>
+                  <td>{item.vehicle_type || '—'}</td>
                   <td>
                     <StatusBadge
-                      status={vehicle.is_valid ? 'ACTIVO' : 'CANCELADO'}
-                      label={vehicle.is_valid ? 'Activo' : 'No vigente'}
+                      status={item.movement === 'ENTRADA' ? 'PERMITIDO' : 'CANCELADO'}
+                      label={item.movement === 'ENTRADA' ? 'Entrada' : 'Salida'}
                     />
+                  </td>
+                  <td>
+                    <span className={item.is_exception ? 'badge-warning' : 'badge-info'}>
+                      {item.status_after_display}
+                    </span>
                   </td>
                 </tr>
               ))}
             </tbody>
           </table>
         </div>
+        <Pagination
+          page={movementPage}
+          pageCount={movementTotalPages}
+          total={movementMeta.count}
+          onPageChange={setMovementPage}
+        />
       </div>
 
+      {/* Modal: entrada por excepción */}
       <Modal
-        open={modalOpen}
-        onClose={() => setModalOpen(false)}
-        title="Nuevo vehículo autorizado"
+        open={exceptionOpen}
+        onClose={() => setExceptionOpen(false)}
+        title="Entrada por excepción"
+        description={`Vehículo ${plate} no autorizado. Indique el motivo del acceso.`}
         footer={
           <>
-            <button type="button" className="btn-secondary" onClick={() => setModalOpen(false)}>
+            <button type="button" className="btn-secondary" onClick={() => setExceptionOpen(false)}>
               Cancelar
             </button>
-            <button type="submit" form="vehicle-form" className="btn-primary">
-              Guardar
+            <button type="submit" form="exception-form" className="btn-primary" disabled={submitting}>
+              {submitting ? 'Registrando…' : 'Registrar'}
             </button>
           </>
         }
       >
-        <form id="vehicle-form" onSubmit={handleCreateVehicle} className="space-y-4">
+        <form id="exception-form" onSubmit={handleRegisterException} className="space-y-4">
           <div>
-            <label className="label" htmlFor="new-plate">Placa</label>
-            <input
-              id="new-plate"
-              className="input mono uppercase"
-              required
-              value={newVehicle.plate}
-              onChange={(event) => setNewVehicle({ ...newVehicle, plate: event.target.value.toUpperCase() })}
-            />
+            <label className="label" htmlFor="exception-plate">Placa</label>
+            <input id="exception-plate" className="input mono uppercase" value={plate} readOnly />
           </div>
           <div>
-            <label className="label" htmlFor="new-type">Tipo de vehículo</label>
-            <select
-              id="new-type"
-              className="input"
-              value={newVehicle.vehicle_type}
-              onChange={(event) => setNewVehicle({ ...newVehicle, vehicle_type: event.target.value })}
-            >
-              {['Automóvil', 'Motocicleta', 'Ómnibus', 'Camión', 'Bicicleta'].map((type) => (
-                <option key={type} value={type}>{type}</option>
-              ))}
-            </select>
-          </div>
-          <div>
-            <label className="label" htmlFor="new-owner">Propietario / área</label>
-            <input
-              id="new-owner"
+            <label className="label" htmlFor="exception-reason">Motivo de la excepción</label>
+            <textarea
+              id="exception-reason"
+              rows={3}
               className="input"
               required
-              value={newVehicle.owner_name}
-              onChange={(event) => setNewVehicle({ ...newVehicle, owner_name: event.target.value })}
-            />
-          </div>
-          <div>
-            <label className="label" htmlFor="new-reason">Motivo de autorización</label>
-            <input
-              id="new-reason"
-              className="input"
-              required
-              value={newVehicle.authorization_reason}
-              onChange={(event) => setNewVehicle({ ...newVehicle, authorization_reason: event.target.value })}
+              placeholder="Ej. Entrega de materiales del taller mecánico central"
+              value={exceptionReason}
+              onChange={(event) => setExceptionReason(event.target.value)}
             />
           </div>
         </form>
