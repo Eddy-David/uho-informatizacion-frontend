@@ -112,6 +112,9 @@ export const visitorService = {
     api.post(`/visitors/requests/${uuid}/reject/`, { comment }).then(unwrap),
   requestChanges: (uuid, comment) =>
     api.post(`/visitors/requests/${uuid}/request-changes/`, { comment }).then(unwrap),
+  /** PATCH /estado/ — contrato compacto {estado, motivo} (RF-05.5). */
+  setEstado: (uuid, estado, motivo = '') =>
+    api.patch(`/visitors/requests/${uuid}/estado/`, { estado, motivo }).then(unwrap),
   visitors: (params) => api.get('/visitors/visitors/', { params: clean(params) }).then(unwrap),
   inside: () => api.get('/visitors/visitors/inside/').then(unwrap),
   checkOut: (uuid) => api.post(`/visitors/visitors/${uuid}/check-out/`).then(unwrap),
