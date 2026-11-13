@@ -83,6 +83,29 @@ export function filenameFromDisposition(header, fallback = 'reporte') {
   return match ? match[1] : fallback;
 }
 
+/**
+ * Guarda una respuesta de Axios con ``responseType: 'blob'`` como archivo.
+ *
+ * Devuelve ``true`` si el contenido es un documento descargable. Si el backend
+ * respondió un JSON de error (por ejemplo un ``403``) dentro del Blob, lo lee
+ * como texto y lo devuelve para poder mostrar el mensaje real al usuario
+ * en lugar de guardar un archivo corrupto.
+ */
+export async function saveDownload(response, fallback = 'reporte') {
+  const blob = response?.data instanceof Blob ? response.data : new Blob([response?.data]);
+  const type = blob.type || '';
+  if (type.includes('json') || type.includes('text/plain')) {
+    const text = await blob.text();
+    try {
+      return { ok: false, message: JSON.parse(text)?.detail || text };
+    } catch {
+      return { ok: false, message: text };
+    }
+  }
+  downloadBlob(blob, filenameFromDisposition(response.headers?.['content-disposition'], fallback));
+  return { ok: true };
+}
+
 /** Indica si el dispositivo tiene conexión (RNF-09). */
 export function isOnline() {
   return typeof navigator === 'undefined' ? true : navigator.onLine !== false;

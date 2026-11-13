@@ -6,7 +6,7 @@ import { EmptyState, ErrorState } from '@/components/ui/DataStates';
 import StatusBadge from '@/components/ui/StatusBadge';
 import Icon from '@/components/ui/Icon';
 import api from '@/services/api';
-import { downloadBlob, filenameFromDisposition, formatDateTime } from '@/utils';
+import { formatDateTime, saveDownload } from '@/utils';
 
 /** Bitácora histórica de accesos con filtros y exportación. */
 export default function AccessLogPage() {
@@ -43,13 +43,13 @@ export default function AccessLogPage() {
         params: { ...filters, page_size: undefined, page: undefined },
         responseType: 'blob',
       });
-      downloadBlob(
-        response.data,
-        filenameFromDisposition(
-          response.headers['content-disposition'],
-          `bitacora.${format === 'excel' ? 'xlsx' : 'pdf'}`,
-        ),
+      const result = await saveDownload(
+        response,
+        `bitacora.${format === 'excel' ? 'xlsx' : 'pdf'}`,
       );
+      if (!result.ok) {
+        setError(result.message || 'No fue posible generar el documento.');
+      }
     } catch (err) {
       setError(parseApiError(err));
     } finally {

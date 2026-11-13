@@ -5,17 +5,38 @@ import { PageContainer, PageHeader } from '@/components/layout/PageHeader';
 import { EmptyState } from '@/components/ui/DataStates';
 import Icon from '@/components/ui/Icon';
 import { useToast } from '@/components/ui/Toast';
-import { downloadBlob, filenameFromDisposition, formatDate } from '@/utils';
+import { useAuth } from '@/features/auth/AuthContext';
+import { formatDate, saveDownload } from '@/utils';
+
+/** Reporte que replica el listado de la bitácora (RF-08.6). */
+const ACCESS_REPORT = 'access-detail';
+/** Reportes de listado con exportación directa a PDF/Excel. */
+const EXPORTABLE_REPORTS = ['access-detail', 'visits', 'vehicles'];
+
+/**
+ * Convierte una fecha ISO (``2026-11-13``) en texto ``dd/mm/aaaa`` sin pasar
+ * por ``Date``: así la fecha que se muestra es exactamente la consultada y no
+ * se desplaza un día por la zona horaria.
+ */
+function displayDate(value) {
+  if (!value) return '—';
+  const match = /^(\d{4})-(\d{2})-(\d{2})/.exec(String(value));
+  return match ? `${match[3]}/${match[2]}/${match[1]}` : formatDate(value);
+}
 
 /** Reportes institucionales con exportación a PDF y Excel. */
 export default function ReportsPage() {
   const toast = useToast();
+  const { hasPermission } = useAuth();
   const [types, setTypes] = useState([]);
   const [campuses, setCampuses] = useState([]);
-  const [filters, setFilters] = useState({ report: 'access-by-day', date_from: '', date_to: '', campus: '' });
+  const [filters, setFilters] = useState({ report: ACCESS_REPORT, date_from: '', date_to: '', campus: '' });
   const [data, setData] = useState(null);
   const [loading, setLoading] = useState(false);
   const [exporting, setExporting] = useState('');
+
+  // Solo los roles con ``reports:export`` ven los botones de descarga.
+  const canExport = hasPermission('reports');
 
   useEffect(() => {
     reportService.types().then(setTypes).catch(() => setTypes([]));
@@ -39,20 +60,33 @@ export default function ReportsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  /**
+   * Descarga el reporte como Blob. Envía **los mismos filtros que se están
+   * mostrando en pantalla** (``data.filters`` del backend) para que el PDF y
+   * el Excel coincidan fila a fila con la tabla.
+   */
   async function handleExport(format) {
     setExporting(format);
+    const request = {
+      report: data?.report || filters.report,
+      date_from: data?.date_from || filters.date_from,
+      date_to: data?.date_to || filters.date_to,
+      campus: filters.campus,
+    };
     try {
       const response =
         format === 'excel'
-          ? await reportService.exportExcel(filters)
-          : await reportService.exportPdf(filters);
-      downloadBlob(
-        response.data,
-        filenameFromDisposition(
-          response.headers['content-disposition'],
-          `reporte.${format === 'excel' ? 'xlsx' : 'pdf'}`,
-        ),
+          ? await reportService.exportExcel(request)
+          : await reportService.exportPdf(request);
+      const result = await saveDownload(
+        response,
+        `${data?.label || 'reporte'}.${format === 'excel' ? 'xlsx' : 'pdf'}`,
       );
+      if (!result.ok) {
+        toast.error(result.message || 'No fue posible generar el documento.');
+        return;
+      }
+      toast.success(`Descarga iniciada: ${format === 'excel' ? 'Excel' : 'PDF'}.`);
     } catch (err) {
       toast.error(
         err?.response?.data instanceof Blob
@@ -64,17 +98,22 @@ export default function ReportsPage() {
     }
   }
 
+  const canExportCurrent = canExport && EXPORTABLE_REPORTS.includes(data?.report || filters.report);
+
   const summary = useMemo(() => {
-    if (!data?.rows?.length) return null;
-    const numeric = data.headers
+    if (!data?.rows?.length) return;
+    const totals = data.headers
       .map((header, index) => ({ header, index }))
-      .filter(({ index }) => typeof data.rows[0][index] === 'number');
-    if (!numeric.length) return null;
-    return numeric.map(({ header, index }) => ({
-      header,
-      total: data.rows.reduce((acc, row) => acc + (Number(row[index]) || 0), 0),
-    }));
+      .filter(({ index }) => data.rows.every((row) => typeof row[index] === 'number'))
+      .map(({ header, index }) => ({
+        header,
+        total: data.rows.reduce((acc, row) => acc + row[index], 0),
+      }));
+    return totals.length ? totals : null;
   }, [data]);
+
+  // Filtros realmente aplicados por el backend (los mismos que recibe el PDF/Excel).
+  const appliedFilters = data?.filters || {};
 
   return (
     <PageContainer>
@@ -82,14 +121,28 @@ export default function ReportsPage() {
         title="Reportes y estadísticas"
         description="Genere indicadores por sede y período, y expórtelos en PDF o Excel."
         actions={
-          <>
-            <button type="button" className="btn-secondary" onClick={() => handleExport('excel')} disabled={!!exporting}>
-              <Icon name="download" size={16} /> {exporting === 'excel' ? 'Generando…' : 'Excel'}
-            </button>
-            <button type="button" className="btn-primary" onClick={() => handleExport('pdf')} disabled={!!exporting}>
-              <Icon name="file" size={16} /> {exporting === 'pdf' ? 'Generando…' : 'PDF'}
-            </button>
-          </>
+          canExport && (
+            <>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => handleExport('excel')}
+                disabled={!!exporting || loading || !canExportCurrent}
+                title={canExportCurrent ? undefined : 'Seleccione un reporte de listado para exportar'}
+              >
+                <Icon name="download" size={16} /> {exporting === 'excel' ? 'Generando…' : 'Exportar a Excel'}
+              </button>
+              <button
+                type="button"
+                className="btn-primary"
+                onClick={() => handleExport('pdf')}
+                disabled={!!exporting || loading || !canExportCurrent}
+                title={canExportCurrent ? undefined : 'Seleccione un reporte de listado para exportar'}
+              >
+                <Icon name="file" size={16} /> {exporting === 'pdf' ? 'Generando…' : 'Exportar a PDF'}
+              </button>
+            </>
+          )
         }
       />
 
@@ -113,6 +166,7 @@ export default function ReportsPage() {
             id="from"
             type="date"
             className="input"
+            max={filters.date_to || undefined}
             value={filters.date_from}
             onChange={(event) => setFilters({ ...filters, date_from: event.target.value })}
           />
@@ -123,6 +177,7 @@ export default function ReportsPage() {
             id="to"
             type="date"
             className="input"
+            min={filters.date_from || undefined}
             value={filters.date_to}
             onChange={(event) => setFilters({ ...filters, date_to: event.target.value })}
           />
@@ -163,7 +218,9 @@ export default function ReportsPage() {
             <h2 className="card-title">{data?.title || 'Reporte'}</h2>
             {data && (
               <p className="text-xs text-brand-400">
-                {formatDate(data.date_from)} — {formatDate(data.date_to)} · {data.rows.length} filas
+                Desde {displayDate(appliedFilters.Desde || data.date_from)} — Hasta{' '}
+                {displayDate(appliedFilters.Hasta || data.date_to)} · Sede: {appliedFilters.Sede || 'Todas'} ·{' '}
+                {data.rows.length} filas
               </p>
             )}
           </div>
